@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Thunderbird MCP Bridge",
+  "version": "0.1.0",
+  "description": "Local bridge that lets Claude read displayed Thunderbird messages and create drafts through MCP.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "thunderbird-mcp@local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": ["src/background.js"],
+    "type": "module"
+  },
+  "icons": {
+    "32": "icons/icon.svg",
+    "64": "icons/icon.svg"
+  },
+  "message_display_action": {
+    "default_title": "Thunderbird MCP",
+    "default_icon": "icons/icon.svg"
+  },
+  "compose_action": {
+    "default_title": "Thunderbird MCP",
+    "default_icon": "icons/icon.svg"
+  },
+  "permissions": [
+    "messagesRead",
+    "accountsRead",
+    "compose",
+    "compose.save",
+    "nativeMessaging",
+    "storage"
+  ]
+}

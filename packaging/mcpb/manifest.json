@@ -1,0 +1,118 @@
+{
+  "manifest_version": "0.3",
+  "name": "thunderbird-mcp",
+  "display_name": "Thunderbird MCP",
+  "version": "0.1.0",
+  "description": "Connects Claude Desktop to the local Thunderbird MCP bridge.",
+  "long_description": "A local MCP server for reading Thunderbird messages and creating Thunderbird compose drafts. It requires the Thunderbird MCP Bridge add-on and native host registration. It never sends email.",
+  "author": {
+    "name": "Thunderbird MCP Contributors"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "host/src/cli.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/host/src/cli.js", "mcp"],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "status",
+      "description": "Check whether Thunderbird and the local native bridge are connected."
+    },
+    {
+      "name": "get_current_message",
+      "description": "Read the message currently displayed in Thunderbird."
+    },
+    {
+      "name": "get_current_messages",
+      "description": "Read all messages currently displayed in Thunderbird."
+    },
+    {
+      "name": "search_messages",
+      "description": "Search Thunderbird messages using Thunderbird's local message index, including date presets, year, sender, recipient, size, tags, and attachment filters."
+    },
+    {
+      "name": "get_message",
+      "description": "Read a Thunderbird message by its current internal message id."
+    },
+    {
+      "name": "get_message_headers",
+      "description": "Read decoded RFC 822 headers for a Thunderbird message."
+    },
+    {
+      "name": "get_raw_message",
+      "description": "Read capped raw RFC 822 message source as text or base64."
+    },
+    {
+      "name": "list_message_text_parts",
+      "description": "List Thunderbird inline text parts for a message."
+    },
+    {
+      "name": "list_attachments",
+      "description": "List attachments for a message or the currently displayed message."
+    },
+    {
+      "name": "search_attachments",
+      "description": "Search messages with attachments and filter attachment metadata."
+    },
+    {
+      "name": "get_attachment",
+      "description": "Retrieve text or explicitly requested base64 content for one attachment."
+    },
+    {
+      "name": "read_attachment",
+      "description": "Read text-like attachment contents by message id and part name."
+    },
+    {
+      "name": "download_attachment",
+      "description": "Return capped base64 attachment bytes by message id and part name."
+    },
+    {
+      "name": "save_attachment",
+      "description": "Save an attachment locally using chunked reads."
+    },
+    {
+      "name": "open_attachment",
+      "description": "Open an attachment in Thunderbird or the OS handler."
+    },
+    {
+      "name": "list_folders",
+      "description": "List configured Thunderbird accounts and folders."
+    },
+    {
+      "name": "open_compose",
+      "description": "Open a Thunderbird compose window. This never sends mail."
+    },
+    {
+      "name": "create_reply_draft",
+      "description": "Open and optionally save a Thunderbird reply draft. This never sends mail."
+    }
+  ],
+  "prompts": [
+    {
+      "name": "draft_reply",
+      "description": "Draft a reply to the current Thunderbird message.",
+      "arguments": ["tone"],
+      "text": "Read the current Thunderbird message, summarize it, and create a reply draft. Do not send the message."
+    },
+    {
+      "name": "triage_current_message",
+      "description": "Summarize the current Thunderbird message and extract action items.",
+      "arguments": [],
+      "text": "Read the current Thunderbird message, summarize it, extract action items, and suggest whether a reply is needed."
+    }
+  ],
+  "keywords": ["thunderbird", "email", "local", "mcp"],
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "privacy_policies": []
+}

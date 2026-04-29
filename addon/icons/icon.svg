@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Thunderbird MCP">
+  <rect width="64" height="64" rx="14" fill="#2457a6"/>
+  <path d="M12 22h40v24H12z" fill="#f8fafc"/>
+  <path d="M12 22l20 15 20-15" fill="none" stroke="#2457a6" stroke-width="4" stroke-linejoin="round"/>
+  <circle cx="47" cy="17" r="8" fill="#26a269"/>
+  <path d="M43 17h8M47 13v8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

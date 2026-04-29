@@ -1,0 +1,31 @@
+{
+  "name": "thunderbird-mcp-connector",
+  "version": "0.1.0",
+  "description": "Local Thunderbird connector for Claude via MCP.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "thunderbird-mcp": "./dist/host/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && vitest run --maxWorkers=1",
+    "clean": "rm -rf dist build",
+    "install-native": "node ./dist/host/src/cli.js install-native",
+    "uninstall-native": "node ./dist/host/src/cli.js uninstall-native",
+    "mcp": "node ./dist/host/src/cli.js mcp",
+    "native-host": "node ./dist/host/src/cli.js native-host",
+    "claude-config": "node ./dist/host/src/cli.js print-claude-config",
+    "package:xpi": "node ./packaging/xpi/build-xpi.mjs",
+    "package:mcpb": "node ./packaging/mcpb/build-mcpb.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
