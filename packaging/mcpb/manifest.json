@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "thunderbird-mcp",
   "display_name": "Thunderbird MCP",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connects Claude Desktop to the local Thunderbird MCP bridge.",
   "long_description": "A local MCP server for reading Thunderbird messages and creating Thunderbird compose drafts. It requires the Thunderbird MCP Bridge add-on and native host registration. It never sends email.",
   "author": {

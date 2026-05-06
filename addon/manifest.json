@@ -1,7 +1,7 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "Thunderbird MCP Bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local bridge that lets Claude read displayed Thunderbird messages and create drafts through MCP.",
   "browser_specific_settings": {
     "gecko": {
@@ -11,7 +11,7 @@
   },
   "background": {
     "scripts": ["src/background.js"],
-    "type": "module"
+    "persistent": true
   },
   "icons": {
     "32": "icons/icon.svg",

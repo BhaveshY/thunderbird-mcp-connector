@@ -2,7 +2,7 @@ export const EXTENSION_ID = "thunderbird-mcp@local";
 export const NATIVE_HOST_NAME = "com.thunderbird_mcp.bridge";
 export const MCP_SERVER_NAME = "thunderbird-mcp";
 export const MCP_SERVER_TITLE = "Thunderbird MCP";
-export const CONNECTOR_VERSION = "0.1.0";
+export const CONNECTOR_VERSION = "0.1.1";
 
 export const STATE_DIR_NAME = ".thunderbird-mcp";
 export const BROKER_STATE_FILE = "broker.json";

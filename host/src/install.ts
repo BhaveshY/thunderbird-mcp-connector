@@ -40,16 +40,7 @@ export async function installNativeHost(): Promise<InstallResult> {
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 
   if (platform() === "win32") {
-    execFileSync("reg", [
-      "add",
-      `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
-      "/ve",
-      "/t",
-      "REG_SZ",
-      "/d",
-      manifestPath,
-      "/f"
-    ]);
+    addWindowsNativeHostRegistry(manifestPath);
   }
 
   return { manifestPath, wrapperPath, nativeHostName: NATIVE_HOST_NAME, extensionId: EXTENSION_ID };
@@ -63,11 +54,7 @@ export async function uninstallNativeHost(): Promise<InstallResult> {
   await rm(wrapperPath, { force: true });
 
   if (platform() === "win32") {
-    try {
-      execFileSync("reg", ["delete", `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`, "/f"]);
-    } catch {
-      // Already absent.
-    }
+    deleteWindowsNativeHostRegistry();
   }
 
   return { manifestPath, wrapperPath, nativeHostName: NATIVE_HOST_NAME, extensionId: EXTENSION_ID };
@@ -91,4 +78,27 @@ async function writeWindowsWrapper(wrapperPath: string, cliPath: string): Promis
   const nodePath = process.execPath;
   const script = `@echo off\r\n"${nodePath}" "${cliPath}" native-host\r\n`;
   await writeFile(wrapperPath, script, { mode: 0o700 });
+}
+
+function addWindowsNativeHostRegistry(manifestPath: string): void {
+  for (const key of getWindowsRegistryKeys()) {
+    execFileSync("reg", ["add", key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f"]);
+  }
+}
+
+function deleteWindowsNativeHostRegistry(): void {
+  for (const key of getWindowsRegistryKeys()) {
+    try {
+      execFileSync("reg", ["delete", key, "/f"]);
+    } catch {
+      // Already absent.
+    }
+  }
+}
+
+function getWindowsRegistryKeys(): string[] {
+  return [
+    `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
+    `HKCU\\Software\\Wow6432Node\\Mozilla\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`
+  ];
 }
