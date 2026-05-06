@@ -493,7 +493,8 @@ async function saveAttachment(args: JsonObject): Promise<JsonObject> {
         messageId,
         partName,
         offsetBytes,
-        maxBytes: ATTACHMENT_SAVE_CHUNK_BYTES
+        maxBytes: ATTACHMENT_SAVE_CHUNK_BYTES,
+        format: "base64"
       });
       if (!chunk || typeof chunk !== "object" || Array.isArray(chunk)) {
         throw new ConnectorError("Attachment chunk response was not an object.", "ATTACHMENT_CHUNK_FAILED");
