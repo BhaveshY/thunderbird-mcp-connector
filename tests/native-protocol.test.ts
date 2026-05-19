@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { NativeProtocol } from "../host/src/native-protocol.js";
+import { MAX_NATIVE_MESSAGE_BYTES } from "../shared/src/constants.js";
 
 describe("NativeProtocol", () => {
   it("writes Mozilla native messaging length-prefixed JSON", () => {
@@ -36,5 +37,40 @@ describe("NativeProtocol", () => {
     input.write(Buffer.concat([header, body]));
 
     await expect(received).resolves.toEqual({ id: "1", type: "ping" });
+  });
+
+  it("rejects oversized incoming frames before buffering the body", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const protocol = new NativeProtocol(input, output);
+    protocol.start();
+
+    const errored = new Promise<Error>((resolve) => {
+      protocol.once("error", resolve);
+    });
+
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(MAX_NATIVE_MESSAGE_BYTES + 1, 0);
+    input.write(header);
+
+    await expect(errored).resolves.toMatchObject({
+      message: `Native message length ${MAX_NATIVE_MESSAGE_BYTES + 1} exceeds ${MAX_NATIVE_MESSAGE_BYTES} bytes`
+    });
+  });
+
+  it("emits close once when the input ends and closes", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const protocol = new NativeProtocol(input, output);
+    let closeCount = 0;
+    protocol.on("close", () => {
+      closeCount += 1;
+    });
+    protocol.start();
+
+    input.end();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(closeCount).toBe(1);
   });
 });

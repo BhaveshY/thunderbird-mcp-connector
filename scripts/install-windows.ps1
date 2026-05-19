@@ -302,7 +302,7 @@ function Install-ThunderbirdAddon {
   $target = Join-Path $extensionsDir "thunderbird-mcp@local.xpi"
   $oldPointer = Join-Path $extensionsDir "thunderbird-mcp@local"
   if (Test-Path -LiteralPath $oldPointer) {
-    Remove-Item -LiteralPath $oldPointer -Force
+    Remove-Item -LiteralPath $oldPointer -Force -Recurse
   }
 
   try {
@@ -410,8 +410,11 @@ function Update-ClaudeDesktopConfig {
     $config = "{}" | ConvertFrom-Json
   }
 
-  if ($null -eq $config.mcpServers) {
+  $mcpServersProperty = $config.PSObject.Properties["mcpServers"]
+  if ($null -eq $mcpServersProperty) {
     $config | Add-Member -MemberType NoteProperty -Name mcpServers -Value ([pscustomobject]@{})
+  } elseif ($null -eq $mcpServersProperty.Value -or $mcpServersProperty.Value -isnot [pscustomobject]) {
+    $config.mcpServers = [pscustomobject]@{}
   }
 
   $server = [ordered]@{

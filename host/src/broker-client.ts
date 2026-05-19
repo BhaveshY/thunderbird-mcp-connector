@@ -17,20 +17,45 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
   return new Promise<JsonValue>((resolve, reject) => {
     const socket = connect({ host: state.host, port: state.port });
     const id = crypto.randomUUID();
-    const timer = setTimeout(() => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const fail = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
       socket.destroy();
-      reject(new ConnectorError(`Timed out waiting for broker response to ${type}`, "BROKER_TIMEOUT"));
+      reject(error);
+    };
+    const succeed = (value: JsonValue) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      fail(new ConnectorError(`Timed out waiting for broker response to ${type}`, "BROKER_TIMEOUT"));
     }, timeoutMs);
+
+    socket.once("close", () => {
+      fail(new ConnectorError(`Broker connection closed before responding to ${type}`, "BROKER_CLOSED"));
+    });
 
     socket.once("connect", () => {
       const lineSocket = new LineJsonSocket(socket);
       lineSocket.once("message", (raw) => {
-        clearTimeout(timer);
         const response = raw as BrokerResponse;
         if (response.ok) {
-          resolve(response.result ?? null);
+          succeed(response.result ?? null);
         } else {
-          reject(
+          fail(
             new ConnectorError(
               response.error?.message ?? "Broker request failed",
               response.error?.code ?? "BROKER_REQUEST_FAILED",
@@ -41,15 +66,22 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
         lineSocket.end();
       });
       lineSocket.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
+        fail(error);
       });
       lineSocket.send({ id, token: state.token, type, payload } satisfies BrokerRequest);
     });
 
     socket.once("error", (error) => {
-      clearTimeout(timer);
-      reject(
+      if (isConnectionResetError(error)) {
+        fail(
+          new ConnectorError(`Broker connection closed before responding to ${type}`, "BROKER_CLOSED", {
+            cause: error.message
+          })
+        );
+        return;
+      }
+
+      fail(
         new ConnectorError(
           "Could not connect to Thunderbird bridge. Restart Thunderbird or reinstall the native host.",
           "BROKER_CONNECT_FAILED",
@@ -62,4 +94,8 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
 
 export async function getBrokerStatus(): Promise<JsonValue> {
   return callBroker("broker.status", undefined, 5_000);
+}
+
+function isConnectionResetError(error: Error): boolean {
+  return (error as { code?: unknown }).code === "ECONNRESET";
 }

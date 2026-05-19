@@ -13,5 +13,7 @@ export const MAX_ATTACHMENT_TOOL_BYTES = 5_000_000;
 export const ATTACHMENT_SAVE_CHUNK_BYTES = 750_000;
 export const MAX_SEARCH_LIMIT = 100;
 export const DEFAULT_SEARCH_LIMIT = 25;
+export const MAX_NATIVE_MESSAGE_BYTES = 32 * 1024 * 1024;
+export const MAX_LINE_JSON_BYTES = 32 * 1024 * 1024;
 
 export const PROTOCOL_VERSION = "2025-06-18";

@@ -21,6 +21,7 @@ describe("MCP server", () => {
       stdout += chunk;
     });
 
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "ping", params: {} })}\n`);
     child.stdin.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
@@ -51,6 +52,7 @@ describe("MCP server", () => {
     await once(child, "exit");
 
     const responses = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(responses).toHaveLength(4);
     const byId = new Map(responses.map((response) => [response.id, response]));
     expect(byId.get(1).result.serverInfo.name).toBe("thunderbird-mcp");
     expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "get_current_message")).toBe(true);

@@ -1,3 +1,4 @@
+import { createServer, type AddressInfo } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { callBroker } from "../host/src/broker-client.js";
 import { ThunderbirdBroker } from "../host/src/broker.js";
 import { NativeProtocol } from "../host/src/native-protocol.js";
+import { writeBrokerState } from "../host/src/state.js";
 
 let tempDir: string;
 
@@ -44,6 +46,33 @@ describe("ThunderbirdBroker", () => {
 
     await expect(brokerCall).resolves.toEqual({ id: 42, subject: "Bridge works" });
     await broker.stop();
+  });
+
+  it("fails promptly when the broker closes before sending a response", async () => {
+    const server = createServer((socket) => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as AddressInfo;
+    await writeBrokerState({
+      version: 1,
+      host: "127.0.0.1",
+      port: address.port,
+      token: "token",
+      pid: process.pid,
+      nativeHostName: "com.thunderbird_mcp.bridge",
+      extensionId: "thunderbird-mcp@local",
+      startedAt: new Date().toISOString()
+    });
+
+    await expect(callBroker("tool.get_current_message", {}, 10_000)).rejects.toMatchObject({
+      code: "BROKER_CLOSED"
+    });
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });
 

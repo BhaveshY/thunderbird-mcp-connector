@@ -6,9 +6,9 @@ import {
   MAX_ATTACHMENT_TOOL_BYTES,
   MAX_SEARCH_LIMIT
 } from "../../shared/src/constants.js";
-import { mkdir, open, stat } from "node:fs/promises";
+import { mkdir, open } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { JsonObject, JsonValue } from "../../shared/src/types.js";
 import { callBroker, getBrokerStatus } from "./broker-client.js";
 import { ConnectorError } from "./errors.js";
@@ -480,9 +480,8 @@ async function saveAttachment(args: JsonObject): Promise<JsonObject> {
   const filename = sanitizeFilename(rawName);
   const outputDir = resolveOutputDir(args);
   await mkdir(outputDir, { recursive: true });
-  const outputPath = await chooseOutputPath(join(outputDir, filename), args.overwrite === true);
+  const { outputPath, handle } = await openOutputFile(join(outputDir, filename), args.overwrite === true);
 
-  const handle = await open(outputPath, "w");
   let offsetBytes = 0;
   let chunks = 0;
   let totalBytes = typeof attachment?.size === "number" ? attachment.size : null;
@@ -538,7 +537,7 @@ function resolveOutputDir(args: JsonObject): string {
   const resolved = resolve(requested.replace(/^~(?=$|\/|\\)/, home));
   const homeResolved = resolve(home);
 
-  if (args.allowOutsideHome !== true && resolved !== homeResolved && !resolved.startsWith(`${homeResolved}/`)) {
+  if (args.allowOutsideHome !== true && !isPathInsideOrEqual(homeResolved, resolved)) {
     throw new ConnectorError(
       "Refusing to save outside the user's home directory unless allowOutsideHome is true.",
       "OUTPUT_DIR_NOT_ALLOWED",
@@ -549,32 +548,64 @@ function resolveOutputDir(args: JsonObject): string {
   return resolved;
 }
 
+interface PathContainmentOps {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+}
+
+export function isPathInsideOrEqual(
+  parent: string,
+  candidate: string,
+  pathOps: PathContainmentOps = { relative, isAbsolute }
+): boolean {
+  const relativePath = pathOps.relative(parent, candidate);
+  if (relativePath === "") {
+    return true;
+  }
+
+  const firstSegment = relativePath.split(/[\\/]/, 1)[0];
+  return firstSegment !== ".." && !pathOps.isAbsolute(relativePath);
+}
+
 function sanitizeFilename(value: string): string {
-  const name = basename(value).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
+  let name = basename(value)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  if (!name || name === "." || name === "..") {
+    return "attachment";
+  }
+
+  const extension = extname(name);
+  const stem = extension ? name.slice(0, -extension.length) : name;
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(stem)) {
+    name = `_${name}`;
+  }
   return name || "attachment";
 }
 
-async function chooseOutputPath(path: string, overwrite: boolean): Promise<string> {
+async function openOutputFile(path: string, overwrite: boolean): Promise<{ outputPath: string; handle: Awaited<ReturnType<typeof open>> }> {
   if (overwrite) {
-    return path;
-  }
-
-  try {
-    await stat(path);
-  } catch {
-    return path;
+    return { outputPath: path, handle: await open(path, "w") };
   }
 
   const dir = dirname(path);
   const ext = extname(path);
   const stem = basename(path, ext);
-  for (let index = 1; index < 10_000; index += 1) {
-    const candidate = join(dir, `${stem}-${index}${ext}`);
+
+  for (let index = 0; index < 10_000; index += 1) {
+    const candidate = index === 0 ? path : join(dir, `${stem}-${index}${ext}`);
     try {
-      await stat(candidate);
-    } catch {
-      return candidate;
+      return { outputPath: candidate, handle: await open(candidate, "wx") };
+    } catch (error) {
+      if (!isFileExistsError(error)) {
+        throw error;
+      }
     }
   }
   throw new ConnectorError("Could not find a non-existing output filename.", "OUTPUT_PATH_EXISTS");
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "EEXIST";
 }
