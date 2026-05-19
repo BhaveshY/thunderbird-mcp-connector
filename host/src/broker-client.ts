@@ -72,6 +72,15 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
     });
 
     socket.once("error", (error) => {
+      if (isConnectionResetError(error)) {
+        fail(
+          new ConnectorError(`Broker connection closed before responding to ${type}`, "BROKER_CLOSED", {
+            cause: error.message
+          })
+        );
+        return;
+      }
+
       fail(
         new ConnectorError(
           "Could not connect to Thunderbird bridge. Restart Thunderbird or reinstall the native host.",
@@ -85,4 +94,8 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
 
 export async function getBrokerStatus(): Promise<JsonValue> {
   return callBroker("broker.status", undefined, 5_000);
+}
+
+function isConnectionResetError(error: Error): boolean {
+  return (error as { code?: unknown }).code === "ECONNRESET";
 }
