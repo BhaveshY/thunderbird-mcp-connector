@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
+import { MAX_LINE_JSON_BYTES } from "../../shared/src/constants.js";
 import type { JsonObject, JsonValue } from "../../shared/src/types.js";
 
 export interface JsonRpcRequest {
@@ -23,6 +24,10 @@ export interface JsonRpcFailure {
     message: string;
     data?: unknown;
   };
+}
+
+export function isJsonRpcNotification(request: JsonRpcRequest): boolean {
+  return !Object.prototype.hasOwnProperty.call(request, "id");
 }
 
 export class JsonRpcLineServer extends EventEmitter<{
@@ -58,6 +63,14 @@ export class JsonRpcLineServer extends EventEmitter<{
 
   private receive(chunk: string): void {
     this.buffer += chunk;
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_LINE_JSON_BYTES) {
+      const error = new Error(`JSON-RPC line exceeds ${MAX_LINE_JSON_BYTES} bytes`);
+      this.buffer = "";
+      this.sendError(null, -32700, "Parse error", { message: error.message });
+      this.emit("error", error);
+      return;
+    }
+
     while (true) {
       const index = this.buffer.indexOf("\n");
       if (index === -1) {
@@ -71,9 +84,16 @@ export class JsonRpcLineServer extends EventEmitter<{
       }
 
       try {
-        const request = JSON.parse(line) as JsonRpcRequest;
-        if (request.jsonrpc !== "2.0" || typeof request.method !== "string") {
-          this.sendError(request.id ?? null, -32600, "Invalid JSON-RPC request");
+        const parsed = JSON.parse(line) as unknown;
+        if (!isJsonObject(parsed)) {
+          this.sendError(null, -32600, "Invalid JSON-RPC request");
+          continue;
+        }
+
+        const request = parsed as unknown as JsonRpcRequest;
+        const responseId = responseIdFor(parsed);
+        if (request.jsonrpc !== "2.0" || typeof request.method !== "string" || !hasValidId(parsed)) {
+          this.sendError(responseId, -32600, "Invalid JSON-RPC request");
           continue;
         }
         this.emit("request", request);
@@ -88,4 +108,20 @@ export class JsonRpcLineServer extends EventEmitter<{
   private write(message: JsonRpcSuccess | JsonRpcFailure | JsonObject): void {
     this.output.write(`${JSON.stringify(message)}\n`);
   }
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasValidId(value: JsonObject): boolean {
+  if (!Object.prototype.hasOwnProperty.call(value, "id")) {
+    return true;
+  }
+
+  return value.id === null || typeof value.id === "string" || typeof value.id === "number";
+}
+
+function responseIdFor(value: JsonObject): string | number | null {
+  return value.id === null || typeof value.id === "string" || typeof value.id === "number" ? value.id : null;
 }

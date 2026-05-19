@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { Socket } from "node:net";
+import { MAX_LINE_JSON_BYTES } from "../../shared/src/constants.js";
 
 export class LineJsonSocket extends EventEmitter<{
   message: [unknown];
@@ -7,6 +8,7 @@ export class LineJsonSocket extends EventEmitter<{
   close: [];
 }> {
   private buffer = "";
+  private failed = false;
 
   constructor(private readonly socket: Socket) {
     super();
@@ -25,7 +27,15 @@ export class LineJsonSocket extends EventEmitter<{
   }
 
   private receive(chunk: string): void {
+    if (this.failed) {
+      return;
+    }
     this.buffer += chunk;
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_LINE_JSON_BYTES) {
+      this.fail(new Error(`Line-delimited JSON message exceeds ${MAX_LINE_JSON_BYTES} bytes`));
+      return;
+    }
+
     while (true) {
       const index = this.buffer.indexOf("\n");
       if (index === -1) {
@@ -39,8 +49,18 @@ export class LineJsonSocket extends EventEmitter<{
       try {
         this.emit("message", JSON.parse(line));
       } catch (error) {
-        this.emit("error", error instanceof Error ? error : new Error(String(error)));
+        this.fail(error instanceof Error ? error : new Error(String(error)));
+        return;
       }
     }
+  }
+
+  private fail(error: Error): void {
+    if (this.failed) {
+      return;
+    }
+    this.failed = true;
+    this.emit("error", error);
+    this.end();
   }
 }

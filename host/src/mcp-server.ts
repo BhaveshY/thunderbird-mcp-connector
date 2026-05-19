@@ -7,7 +7,7 @@ import {
 import type { JsonObject, JsonValue } from "../../shared/src/types.js";
 import { callBroker } from "./broker-client.js";
 import { serializeError } from "./errors.js";
-import { JsonRpcLineServer, type JsonRpcRequest } from "./mcp-jsonrpc.js";
+import { isJsonRpcNotification, JsonRpcLineServer, type JsonRpcRequest } from "./mcp-jsonrpc.js";
 import { callTool, tools } from "./mcp-tools.js";
 
 export function startMcpServer(): void {
@@ -23,6 +23,10 @@ export function startMcpServer(): void {
 }
 
 async function handleRequest(server: JsonRpcLineServer, request: JsonRpcRequest): Promise<void> {
+  if (isJsonRpcNotification(request)) {
+    return;
+  }
+
   const id = request.id ?? null;
 
   try {

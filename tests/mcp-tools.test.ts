@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ATTACHMENT_SAVE_CHUNK_BYTES } from "../shared/src/constants.js";
 import type { JsonObject } from "../shared/src/types.js";
@@ -12,7 +12,7 @@ const brokerMocks = vi.hoisted(() => ({
 
 vi.mock("../host/src/broker-client.js", () => brokerMocks);
 
-import { callTool } from "../host/src/mcp-tools.js";
+import { callTool, isPathInsideOrEqual } from "../host/src/mcp-tools.js";
 
 let tempDir: string;
 
@@ -85,5 +85,91 @@ describe("MCP tools", () => {
     ]);
     expect(await readFile(result.path as string, "utf8")).toBe("hello");
     expect(result.bytesWritten).toBe(5);
+  });
+
+  it("uses an atomic suffix when saving without overwrite", async () => {
+    await writeFile(join(tempDir, "protocol.xlsx"), "original");
+
+    brokerMocks.callBroker.mockImplementation(async (type: string, payload: JsonObject) => {
+      if (type === "tool.get_attachment") {
+        return {
+          messageId: payload.messageId,
+          attachment: {
+            name: "protocol.xlsx",
+            partName: payload.partName,
+            size: 5
+          }
+        };
+      }
+
+      if (type === "tool.download_attachment") {
+        return {
+          format: "base64",
+          base64: Buffer.from("hello").toString("base64"),
+          offsetBytes: 0,
+          nextOffsetBytes: 5,
+          totalBytes: 5,
+          truncated: false
+        };
+      }
+
+      throw new Error(`Unexpected broker call: ${type}`);
+    });
+
+    const result = await callTool("save_attachment", {
+      messageId: 4,
+      partName: "1.2",
+      outputDir: tempDir,
+      filename: "protocol.xlsx",
+      allowOutsideHome: true
+    });
+
+    expect(basename(result.path as string)).toBe("protocol-1.xlsx");
+    expect(await readFile(join(tempDir, "protocol.xlsx"), "utf8")).toBe("original");
+    expect(await readFile(result.path as string, "utf8")).toBe("hello");
+  });
+
+  it("sanitizes unsafe Windows filenames before saving", async () => {
+    brokerMocks.callBroker.mockImplementation(async (type: string, payload: JsonObject) => {
+      if (type === "tool.get_attachment") {
+        return {
+          messageId: payload.messageId,
+          attachment: {
+            name: "ignored.txt",
+            partName: payload.partName,
+            size: 0
+          }
+        };
+      }
+
+      throw new Error(`Unexpected broker call: ${type}`);
+    });
+
+    const traversal = await callTool("save_attachment", {
+      messageId: 4,
+      partName: "1.2",
+      outputDir: tempDir,
+      filename: "..",
+      overwrite: true,
+      allowOutsideHome: true
+    });
+    const reserved = await callTool("save_attachment", {
+      messageId: 4,
+      partName: "1.2",
+      outputDir: tempDir,
+      filename: "CON.txt",
+      overwrite: true,
+      allowOutsideHome: true
+    });
+
+    expect(basename(traversal.path as string)).toBe("attachment");
+    expect(basename(reserved.path as string)).toBe("_CON.txt");
+  });
+
+  it("recognizes Windows child paths without allowing sibling prefixes", () => {
+    expect(isPathInsideOrEqual("C:\\Users\\Ada", "C:\\Users\\Ada\\Downloads", win32)).toBe(true);
+    expect(isPathInsideOrEqual("C:\\Users\\Ada", "C:\\Users\\Ada\\..safe", win32)).toBe(true);
+    expect(isPathInsideOrEqual("C:\\Users\\Ada", "C:\\Users\\Ada2\\Downloads", win32)).toBe(false);
+    expect(isPathInsideOrEqual("C:\\Users\\Ada", "D:\\Users\\Ada\\Downloads", win32)).toBe(false);
   });
 });

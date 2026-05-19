@@ -54,13 +54,22 @@ export async function readBrokerState(): Promise<BrokerState | null> {
     return null;
   }
 
-  const raw = await readFile(path, "utf8");
-  const parsed = JSON.parse(raw) as BrokerState;
+  let parsed: BrokerState;
+  try {
+    const raw = await readFile(path, "utf8");
+    parsed = JSON.parse(raw) as BrokerState;
+  } catch {
+    return null;
+  }
+
   if (
     parsed.version !== 1 ||
     parsed.host !== "127.0.0.1" ||
-    typeof parsed.port !== "number" ||
-    typeof parsed.token !== "string"
+    !Number.isInteger(parsed.port) ||
+    parsed.port < 1 ||
+    parsed.port > 65535 ||
+    typeof parsed.token !== "string" ||
+    parsed.token.length === 0
   ) {
     return null;
   }

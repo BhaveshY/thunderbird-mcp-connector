@@ -16,8 +16,8 @@ export interface InstallResult {
 export async function installNativeHost(): Promise<InstallResult> {
   await ensureStateDir();
 
-  const wrapperPath = getNativeWrapperPath();
-  const manifestPath = getNativeManifestPath();
+  const wrapperPath = resolve(getNativeWrapperPath());
+  const manifestPath = resolve(getNativeManifestPath());
   const cliPath = getCliPath();
 
   await mkdir(dirname(wrapperPath), { recursive: true, mode: 0o700 });
@@ -47,8 +47,8 @@ export async function installNativeHost(): Promise<InstallResult> {
 }
 
 export async function uninstallNativeHost(): Promise<InstallResult> {
-  const wrapperPath = getNativeWrapperPath();
-  const manifestPath = getNativeManifestPath();
+  const wrapperPath = resolve(getNativeWrapperPath());
+  const manifestPath = resolve(getNativeManifestPath());
 
   await rm(manifestPath, { force: true });
   await rm(wrapperPath, { force: true });
@@ -76,8 +76,12 @@ exec "${nodePath}" "${cliPath}" native-host
 
 async function writeWindowsWrapper(wrapperPath: string, cliPath: string): Promise<void> {
   const nodePath = process.execPath;
-  const script = `@echo off\r\n"${nodePath}" "${cliPath}" native-host\r\n`;
+  const script = `@echo off\r\n"${escapeWindowsCmdBatchArgument(nodePath)}" "${escapeWindowsCmdBatchArgument(cliPath)}" native-host\r\n`;
   await writeFile(wrapperPath, script, { mode: 0o700 });
+}
+
+export function escapeWindowsCmdBatchArgument(value: string): string {
+  return value.replaceAll("^", "^^").replaceAll("%", "%%");
 }
 
 function addWindowsNativeHostRegistry(manifestPath: string): void {
