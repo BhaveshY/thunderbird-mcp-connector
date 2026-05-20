@@ -93,6 +93,9 @@ Interpret the error text:
   Open or restart Thunderbird and ensure the add-on is enabled.
 - "Could not connect to Thunderbird bridge" usually means a stale broker state
   file or a native host that exited after writing state.
+- "Built CLI not found" means `npm run install-native` was run before
+  `npm run build`. Run the one-shot Windows installer or build first, then
+  register the native host again.
 
 The broker state file is:
 

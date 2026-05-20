@@ -1,6 +1,6 @@
 import { connect } from "node:net";
 import { DEFAULT_NATIVE_TIMEOUT_MS } from "../../shared/src/constants.js";
-import type { BrokerRequest, BrokerResponse, JsonValue } from "../../shared/src/types.js";
+import type { BrokerRequest, BrokerResponse, BrokerState, JsonValue } from "../../shared/src/types.js";
 import { ConnectorError } from "./errors.js";
 import { LineJsonSocket } from "./line-json.js";
 import { readBrokerState } from "./state.js";
@@ -82,11 +82,7 @@ export async function callBroker(type: string, payload?: JsonValue, timeoutMs = 
       }
 
       fail(
-        new ConnectorError(
-          "Could not connect to Thunderbird bridge. Restart Thunderbird or reinstall the native host.",
-          "BROKER_CONNECT_FAILED",
-          { cause: error.message }
-        )
+        createBrokerConnectError(error, state)
       );
     });
   });
@@ -98,4 +94,44 @@ export async function getBrokerStatus(): Promise<JsonValue> {
 
 function isConnectionResetError(error: Error): boolean {
   return (error as { code?: unknown }).code === "ECONNRESET";
+}
+
+function createBrokerConnectError(error: Error, state: BrokerState): ConnectorError {
+  const brokerPidRunning = isBrokerPidRunning(state.pid);
+  const staleHint = brokerPidRunning === false
+    ? ` The broker state file appears stale because native host pid ${state.pid} is no longer running.`
+    : "";
+
+  return new ConnectorError(
+    `Could not connect to Thunderbird bridge.${staleHint} Open or restart Thunderbird, make sure the Thunderbird MCP Bridge add-on is enabled, and rerun install-native if it still fails.`,
+    "BROKER_CONNECT_FAILED",
+    {
+      cause: error.message,
+      host: state.host,
+      port: state.port,
+      pid: state.pid,
+      startedAt: state.startedAt,
+      brokerPidRunning
+    }
+  );
+}
+
+export function isBrokerPidRunning(pid: number): boolean | null {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    if (code === "EPERM") {
+      return true;
+    }
+    return null;
+  }
 }

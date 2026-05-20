@@ -74,6 +74,37 @@ describe("ThunderbirdBroker", () => {
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
+
+  it("explains stale broker state when the recorded native host pid is gone", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as AddressInfo;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    await writeBrokerState({
+      version: 1,
+      host: "127.0.0.1",
+      port: address.port,
+      token: "token",
+      pid: 99999999,
+      nativeHostName: "com.thunderbird_mcp.bridge",
+      extensionId: "thunderbird-mcp@local",
+      startedAt: new Date().toISOString()
+    });
+
+    await expect(callBroker("broker.status", {}, 1_000)).rejects.toMatchObject({
+      code: "BROKER_CONNECT_FAILED",
+      message: expect.stringContaining("broker state file appears stale"),
+      details: expect.objectContaining({
+        brokerPidRunning: false,
+        pid: 99999999,
+        port: address.port
+      })
+    });
+  });
 });
 
 async function readOneNativeMessage(stream: PassThrough): Promise<unknown> {
