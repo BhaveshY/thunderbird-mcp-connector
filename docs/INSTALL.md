@@ -52,7 +52,7 @@ Build the XPI:
 npm run package:xpi
 ```
 
-Install `build/thunderbird-mcp-bridge-0.1.1.xpi` through Thunderbird:
+Install `build/thunderbird-mcp-bridge-0.1.3.xpi` through Thunderbird:
 
 1. Open Thunderbird.
 2. Open Add-ons Manager.

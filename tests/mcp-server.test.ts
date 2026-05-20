@@ -57,6 +57,9 @@ describe("MCP server", () => {
     expect(byId.get(1).result.serverInfo.name).toBe("thunderbird-mcp");
     expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "get_current_message")).toBe(true);
     expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "save_attachment")).toBe(true);
+    expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "continue_search")).toBe(true);
+    expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "send_message")).toBe(true);
+    expect(byId.get(2).result.tools.some((tool: { name: string }) => tool.name === "delete_messages")).toBe(true);
     expect(byId.get(3).result.structuredContent.connected).toBe(false);
     expect(byId.get(4).result.isError).toBe(true);
     expect(byId.get(4).result.structuredContent.code).toBe("BROKER_NOT_CONNECTED");

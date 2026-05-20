@@ -54,7 +54,7 @@ Next steps:
 2. If Thunderbird asks to approve the Thunderbird MCP Bridge add-on, approve it.
 3. In Claude, ask: "Use Thunderbird MCP to check status."
 
-It reads mail only when you ask. It can create drafts, but it cannot send email.
+It reads mail only when you ask. It can create drafts and can send mail only when a tool call explicitly provides `confirmSend=true`.
 ```
 
 Do not paste message bodies, addresses, or private mail content into the final

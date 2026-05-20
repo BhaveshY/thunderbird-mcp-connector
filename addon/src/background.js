@@ -1,11 +1,19 @@
 const NATIVE_HOST_NAME = "com.thunderbird_mcp.bridge";
 const DEFAULT_MAX_BODY_CHARS = 100000;
-const MAX_SEARCH_LIMIT = 100;
+const MAX_SEARCH_LIMIT = 10000;
+const MAX_ATTACHMENT_SEARCH_LIMIT = 5000;
+const DEFAULT_SEARCH_PAGE_SIZE = 25;
+const MAX_SEARCH_PAGE_SIZE = 100;
+const SEARCH_QUERY_PAGE_SIZE = 200;
+const ATTACHMENT_INSPECT_CONCURRENCY = 8;
+const SEARCH_SESSION_TTL_MS = 10 * 60 * 1000;
+const MAX_SEARCH_SESSIONS = 20;
 const DEFAULT_MAX_ATTACHMENT_BYTES = 1000000;
 const MAX_ATTACHMENT_TOOL_BYTES = 5000000;
 
 let nativePort = null;
 let reconnectTimer = null;
+const searchSessions = new Map();
 
 connectNativeHost();
 
@@ -75,6 +83,10 @@ async function dispatch(type, payload) {
       return getCurrentMessages(payload);
     case "tool.search_messages":
       return searchMessages(payload);
+    case "tool.continue_search":
+      return continueSearch(payload);
+    case "tool.close_search":
+      return closeSearch(payload);
     case "tool.get_message":
       return getMessage(payload);
     case "tool.get_message_headers":
@@ -99,6 +111,24 @@ async function dispatch(type, payload) {
       return openCompose(payload);
     case "tool.create_reply_draft":
       return createReplyDraft(payload);
+    case "tool.send_message":
+      return sendMessage(payload);
+    case "tool.send_reply":
+      return sendReply(payload);
+    case "tool.send_current_compose":
+      return sendCurrentCompose(payload);
+    case "tool.list_tags":
+      return listTags(payload);
+    case "tool.update_message":
+      return updateMessage(payload);
+    case "tool.archive_messages":
+      return archiveMessages(payload);
+    case "tool.move_messages":
+      return moveMessages(payload);
+    case "tool.copy_messages":
+      return copyMessages(payload);
+    case "tool.delete_messages":
+      return deleteMessages(payload);
     default:
       throw new Error(`Unsupported Thunderbird bridge request: ${type}`);
   }
@@ -317,78 +347,28 @@ async function listMessageAttachments(payload = {}) {
 
 async function searchAttachments(payload = {}) {
   const messageLimit = clampInteger(payload.messageLimit, 1, MAX_SEARCH_LIMIT, 25);
-  const attachmentLimit = clampInteger(payload.attachmentLimit, 1, 200, 50);
-  const queryInfo = buildMessageQueryInfo(payload, messageLimit);
+  const attachmentLimit = clampInteger(payload.attachmentLimit, 1, MAX_ATTACHMENT_SEARCH_LIMIT, 50);
+  const pageSize = resolveSearchPageSize(payload.pageSize, attachmentLimit);
+  const resultFormat = resolveResultFormat(payload.resultFormat);
+  const queryInfo = buildMessageQueryInfo(payload, Math.min(SEARCH_QUERY_PAGE_SIZE, messageLimit));
   queryInfo.attachment = true;
 
-  const filename = typeof payload.filename === "string" ? payload.filename.toLowerCase() : "";
-  const extension = normalizeExtension(payload.extension);
-  const contentType = typeof payload.contentType === "string" ? payload.contentType.toLowerCase() : "";
-  const disposition = ["attachment", "inline"].includes(payload.disposition) ? payload.disposition : "";
-  const minSize = Number.isInteger(payload.minSize) ? payload.minSize : null;
-  const maxSize = Number.isInteger(payload.maxSize) ? payload.maxSize : null;
-  const results = [];
-
-  let inspectedMessages = 0;
-  let page = await messenger.messages.query(queryInfo);
-
-  while (page && results.length < attachmentLimit && inspectedMessages < messageLimit) {
-    for (const message of page.messages) {
-      inspectedMessages += 1;
-      const attachments = await messenger.messages.listAttachments(message.id);
-      const matchingAttachments = attachments.map(normalizeAttachment).filter((attachment) => {
-        if (filename && !(attachment.name || "").toLowerCase().includes(filename)) {
-          return false;
-        }
-        if (extension && !attachmentNameHasExtension(attachment.name || "", extension)) {
-          return false;
-        }
-        if (contentType && !(attachment.contentType || "").toLowerCase().includes(contentType)) {
-          return false;
-        }
-        if (disposition && attachment.contentDisposition !== disposition) {
-          return false;
-        }
-        if (minSize !== null && (attachment.size || 0) < minSize) {
-          return false;
-        }
-        if (maxSize !== null && (attachment.size || 0) > maxSize) {
-          return false;
-        }
-        return true;
-      });
-
-      for (const attachment of matchingAttachments) {
-        results.push({
-          message: normalizeMessageHeader(message),
-          attachment
-        });
-        if (results.length >= attachmentLimit) {
-          break;
-        }
-      }
-
-      if (results.length >= attachmentLimit || inspectedMessages >= messageLimit) {
-        break;
-      }
-    }
-
-    if (!page.id || results.length >= attachmentLimit || inspectedMessages >= messageLimit) {
-      if (page.id) {
-        await messenger.messages.abortList(page.id);
-      }
-      break;
-    }
-    page = await messenger.messages.continueList(page.id);
-  }
-
-  return {
-    attachments: results,
-    count: results.length,
-    inspectedMessages,
+  pruneSearchSessions();
+  const page = await messenger.messages.query(queryInfo);
+  const session = createSearchSession("attachments", {
+    listId: page.id || null,
+    messageBuffer: Array.isArray(page.messages) ? page.messages.slice() : [],
+    resultBuffer: [],
+    filters: buildAttachmentSearchFilters(payload),
     messageLimit,
-    attachmentLimit
-  };
+    attachmentLimit,
+    resultFormat,
+    inspectedMessages: 0,
+    delivered: 0,
+    done: !page.id
+  });
+
+  return collectAttachmentSearchPage(session, pageSize);
 }
 
 async function getAttachment(payload = {}) {
@@ -476,29 +456,290 @@ async function openAttachment(payload = {}) {
 
 async function searchMessages(payload = {}) {
   const limit = clampInteger(payload.limit, 1, MAX_SEARCH_LIMIT, 25);
-  const queryInfo = buildMessageQueryInfo(payload, limit);
+  const pageSize = resolveSearchPageSize(payload.pageSize, limit);
+  const resultFormat = resolveResultFormat(payload.resultFormat);
+  const queryInfo = buildMessageQueryInfo(payload, Math.min(SEARCH_QUERY_PAGE_SIZE, limit));
 
+  pruneSearchSessions();
+  const page = await messenger.messages.query(queryInfo);
+  const session = createSearchSession("messages", {
+    listId: page.id || null,
+    messageBuffer: Array.isArray(page.messages) ? page.messages.slice() : [],
+    limit,
+    resultFormat,
+    delivered: 0,
+    done: !page.id
+  });
+
+  return collectMessageSearchPage(session, pageSize);
+}
+
+async function continueSearch(payload = {}) {
+  const pageToken = typeof payload.pageToken === "string" ? payload.pageToken : "";
+  const session = searchSessions.get(pageToken);
+  if (!session) {
+    throw new Error("Search token was not found or has expired.");
+  }
+
+  session.updatedAt = Date.now();
+  const totalLimit = session.kind === "attachments" ? session.attachmentLimit : session.limit;
+  const pageSize = resolveSearchPageSize(payload.pageSize, totalLimit);
+  return session.kind === "attachments"
+    ? collectAttachmentSearchPage(session, pageSize)
+    : collectMessageSearchPage(session, pageSize);
+}
+
+async function closeSearch(payload = {}) {
+  const pageToken = typeof payload.pageToken === "string" ? payload.pageToken : "";
+  const closed = await closeSearchSession(pageToken);
+  return {
+    pageToken,
+    closed
+  };
+}
+
+function createSearchSession(kind, state) {
+  const pageToken = crypto.randomUUID();
+  const session = {
+    pageToken,
+    kind,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...state
+  };
+  searchSessions.set(pageToken, session);
+
+  if (searchSessions.size > MAX_SEARCH_SESSIONS) {
+    const oldest = [...searchSessions.values()].sort((left, right) => left.updatedAt - right.updatedAt)[0];
+    if (oldest) {
+      void closeSearchSession(oldest.pageToken);
+    }
+  }
+
+  return session;
+}
+
+async function collectMessageSearchPage(session, pageSize) {
   const messages = [];
-  let page = await messenger.messages.query(queryInfo);
-
-  while (page) {
-    messages.push(...page.messages.map(normalizeMessageHeader));
-    if (messages.length >= limit) {
-      if (page.id) {
-        await messenger.messages.abortList(page.id);
+  while (messages.length < pageSize && session.delivered < session.limit) {
+    if (session.messageBuffer.length === 0) {
+      if (session.done || !session.listId) {
+        break;
       }
-      break;
+      const page = await messenger.messages.continueList(session.listId);
+      session.listId = page?.id || null;
+      session.messageBuffer = Array.isArray(page?.messages) ? page.messages.slice() : [];
+      session.done = !page?.id;
+      if (session.messageBuffer.length === 0 && session.done) {
+        break;
+      }
     }
-    if (!page.id) {
-      break;
+
+    const message = session.messageBuffer.shift();
+    if (!message) {
+      continue;
     }
-    page = await messenger.messages.continueList(page.id);
+    messages.push(formatSearchMessage(message, session.resultFormat));
+    session.delivered += 1;
+  }
+
+  if (session.delivered >= session.limit) {
+    await closeSearchSession(session.pageToken);
+    session.done = true;
+  }
+
+  const hasMore = hasMoreSearchResults(session);
+  if (!hasMore) {
+    await closeSearchSession(session.pageToken);
   }
 
   return {
-    messages: messages.slice(0, limit),
-    count: Math.min(messages.length, limit),
-    limit
+    messages,
+    count: messages.length,
+    returned: messages.length,
+    delivered: session.delivered,
+    limit: session.limit,
+    resultFormat: session.resultFormat,
+    nextPageToken: hasMore ? session.pageToken : undefined,
+    hasMore
+  };
+}
+
+async function collectAttachmentSearchPage(session, pageSize) {
+  const results = [];
+  while (results.length < pageSize && session.delivered < session.attachmentLimit && session.inspectedMessages < session.messageLimit) {
+    while (session.resultBuffer.length > 0 && results.length < pageSize && session.delivered < session.attachmentLimit) {
+      results.push(formatAttachmentSearchResult(session.resultBuffer.shift(), session.resultFormat));
+      session.delivered += 1;
+    }
+
+    if (results.length >= pageSize || session.delivered >= session.attachmentLimit) {
+      break;
+    }
+
+    if (session.messageBuffer.length === 0) {
+      if (session.done || !session.listId) {
+        break;
+      }
+      const page = await messenger.messages.continueList(session.listId);
+      session.listId = page?.id || null;
+      session.messageBuffer = Array.isArray(page?.messages) ? page.messages.slice() : [];
+      session.done = !page?.id;
+      if (session.messageBuffer.length === 0 && session.done) {
+        break;
+      }
+    }
+
+    const remainingMessages = session.messageLimit - session.inspectedMessages;
+    const batchSize = Math.min(ATTACHMENT_INSPECT_CONCURRENCY, remainingMessages, session.messageBuffer.length);
+    const batch = session.messageBuffer.splice(0, batchSize);
+    session.inspectedMessages += batch.length;
+    const batchResults = await inspectAttachmentBatch(batch, session.filters);
+    session.resultBuffer.push(...batchResults);
+
+    if (batch.length === 0 && session.resultBuffer.length === 0) {
+      break;
+    }
+  }
+
+  if (session.delivered >= session.attachmentLimit || session.inspectedMessages >= session.messageLimit) {
+    await closeSearchSession(session.pageToken);
+    session.done = true;
+  }
+
+  const hasMore = hasMoreSearchResults(session);
+  if (!hasMore) {
+    await closeSearchSession(session.pageToken);
+  }
+
+  return {
+    attachments: results,
+    count: results.length,
+    returned: results.length,
+    delivered: session.delivered,
+    inspectedMessages: session.inspectedMessages,
+    messageLimit: session.messageLimit,
+    attachmentLimit: session.attachmentLimit,
+    resultFormat: session.resultFormat,
+    nextPageToken: hasMore ? session.pageToken : undefined,
+    hasMore
+  };
+}
+
+async function inspectAttachmentBatch(messages, filters) {
+  const nested = await Promise.all(
+    messages.map(async (message) => {
+      const attachments = await messenger.messages.listAttachments(message.id);
+      return attachments.map(normalizeAttachment).filter((attachment) => attachmentMatchesFilters(attachment, filters)).map((attachment) => ({
+        message: normalizeMessageHeader(message),
+        attachment
+      }));
+    })
+  );
+  return nested.flat();
+}
+
+function buildAttachmentSearchFilters(payload) {
+  return {
+    filename: typeof payload.filename === "string" ? payload.filename.toLowerCase() : "",
+    extension: normalizeExtension(payload.extension),
+    contentType: typeof payload.contentType === "string" ? payload.contentType.toLowerCase() : "",
+    disposition: ["attachment", "inline"].includes(payload.disposition) ? payload.disposition : "",
+    minSize: Number.isInteger(payload.minSize) ? payload.minSize : null,
+    maxSize: Number.isInteger(payload.maxSize) ? payload.maxSize : null
+  };
+}
+
+function attachmentMatchesFilters(attachment, filters) {
+  if (filters.filename && !(attachment.name || "").toLowerCase().includes(filters.filename)) {
+    return false;
+  }
+  if (filters.extension && !attachmentNameHasExtension(attachment.name || "", filters.extension)) {
+    return false;
+  }
+  if (filters.contentType && !(attachment.contentType || "").toLowerCase().includes(filters.contentType)) {
+    return false;
+  }
+  if (filters.disposition && attachment.contentDisposition !== filters.disposition) {
+    return false;
+  }
+  if (filters.minSize !== null && (attachment.size || 0) < filters.minSize) {
+    return false;
+  }
+  if (filters.maxSize !== null && (attachment.size || 0) > filters.maxSize) {
+    return false;
+  }
+  return true;
+}
+
+function hasMoreSearchResults(session) {
+  if (session.kind === "attachments") {
+    return (
+      session.resultBuffer.length > 0 ||
+      session.messageBuffer.length > 0 ||
+      (!session.done && Boolean(session.listId))
+    ) && session.delivered < session.attachmentLimit && session.inspectedMessages < session.messageLimit;
+  }
+
+  return (
+    session.messageBuffer.length > 0 ||
+    (!session.done && Boolean(session.listId))
+  ) && session.delivered < session.limit;
+}
+
+async function closeSearchSession(pageToken) {
+  const session = searchSessions.get(pageToken);
+  if (!session) {
+    return false;
+  }
+  searchSessions.delete(pageToken);
+  if (session.listId) {
+    try {
+      await messenger.messages.abortList(session.listId);
+    } catch (error) {
+      console.warn("Could not abort Thunderbird search list:", error);
+    }
+  }
+  return true;
+}
+
+function pruneSearchSessions() {
+  const now = Date.now();
+  for (const session of searchSessions.values()) {
+    if (now - session.updatedAt > SEARCH_SESSION_TTL_MS) {
+      void closeSearchSession(session.pageToken);
+    }
+  }
+}
+
+function resolveSearchPageSize(value, totalLimit) {
+  const fallback = Math.min(DEFAULT_SEARCH_PAGE_SIZE, totalLimit);
+  return clampInteger(value, 1, Math.min(MAX_SEARCH_PAGE_SIZE, totalLimit), fallback);
+}
+
+function resolveResultFormat(value) {
+  return value === "full" ? "full" : "compact";
+}
+
+function formatSearchMessage(message, resultFormat) {
+  return resultFormat === "full" ? normalizeMessageHeader(message) : compactMessageHeader(message);
+}
+
+function formatAttachmentSearchResult(result, resultFormat) {
+  if (resultFormat === "full") {
+    return result;
+  }
+  return {
+    messageId: result.message.id,
+    date: result.message.date,
+    author: result.message.author,
+    subject: result.message.subject,
+    folderPath: result.message.folder?.path,
+    folderName: result.message.folder?.name,
+    name: result.attachment.name,
+    partName: result.attachment.partName,
+    contentType: result.attachment.contentType,
+    size: result.attachment.size
   };
 }
 
@@ -558,6 +799,225 @@ async function createReplyDraft(payload = {}) {
   };
 }
 
+async function sendMessage(payload = {}) {
+  ensureSendConfirmed(payload);
+  const details = buildComposeDetails(payload);
+  ensureHasRecipients(details);
+
+  const tab = await messenger.compose.beginNew(undefined, details);
+  const result = await sendComposeTab(tab.id, payload);
+
+  return {
+    tabId: tab.id,
+    sent: true,
+    ...result
+  };
+}
+
+async function sendReply(payload = {}) {
+  ensureSendConfirmed(payload);
+  const messageId = await resolveMessageId(payload.messageId);
+  const replyType = ["replyToSender", "replyToList", "replyToAll"].includes(payload.replyType)
+    ? payload.replyType
+    : "replyToSender";
+  const details = buildComposeDetails(payload);
+  const tab = await messenger.compose.beginReply(messageId, replyType, details);
+  const result = await sendComposeTab(tab.id, payload);
+
+  return {
+    tabId: tab.id,
+    messageId,
+    replyType,
+    sent: true,
+    ...result
+  };
+}
+
+async function sendCurrentCompose(payload = {}) {
+  ensureSendConfirmed(payload);
+  const tabId = Number.isInteger(payload.tabId) ? payload.tabId : (await getActiveTab()).id;
+  const result = await sendComposeTab(tabId, payload);
+
+  return {
+    tabId,
+    sent: true,
+    ...result
+  };
+}
+
+async function sendComposeTab(tabId, payload = {}) {
+  const mode = resolveSendMode(payload.mode);
+  const result = await messenger.compose.sendMessage(tabId, { mode });
+  return normalizeComposeSendResult(result, mode);
+}
+
+function normalizeComposeSendResult(result, requestedMode) {
+  const messages = result && Array.isArray(result.messages)
+    ? result.messages.map(normalizeMessageHeader)
+    : [];
+  return {
+    mode: result && typeof result.mode === "string" ? result.mode : requestedMode,
+    messages,
+    count: messages.length
+  };
+}
+
+function ensureSendConfirmed(payload) {
+  if (payload.confirmSend !== true) {
+    throw new Error("Refusing to send mail without confirmSend=true.");
+  }
+}
+
+function ensureHasRecipients(details) {
+  const recipientCount = ["to", "cc", "bcc"].reduce((count, field) => {
+    return count + (Array.isArray(details[field]) ? details[field].length : 0);
+  }, 0);
+  if (recipientCount === 0) {
+    throw new Error("send_message requires at least one to, cc, or bcc recipient.");
+  }
+}
+
+function resolveSendMode(value) {
+  return ["sendLater", "sendNow", "default"].includes(value) ? value : "sendLater";
+}
+
+async function listTags() {
+  const tags = await messenger.messages.listTags();
+  return {
+    tags,
+    count: tags.length
+  };
+}
+
+async function updateMessage(payload = {}) {
+  const messageId = Number(payload.messageId);
+  if (!Number.isInteger(messageId)) {
+    throw new Error("messageId must be an integer.");
+  }
+
+  const properties = {};
+  for (const field of ["read", "flagged", "junk"]) {
+    if (typeof payload[field] === "boolean") {
+      properties[field] = payload[field];
+    }
+  }
+  if (Array.isArray(payload.tags) && payload.tags.every((tag) => typeof tag === "string")) {
+    properties.tags = payload.tags;
+  }
+  if (Object.keys(properties).length === 0) {
+    throw new Error("update_message requires at least one of read, flagged, junk, or tags.");
+  }
+
+  await messenger.messages.update(messageId, properties);
+  return {
+    updated: true,
+    messageId,
+    properties
+  };
+}
+
+async function archiveMessages(payload = {}) {
+  const messageIds = normalizeMessageIds(payload.messageIds);
+  await messenger.messages.archive(messageIds);
+  return {
+    archived: true,
+    messageIds,
+    count: messageIds.length
+  };
+}
+
+async function moveMessages(payload = {}) {
+  const messageIds = normalizeMessageIds(payload.messageIds);
+  const destinationFolderId = requireFolderId(payload.destinationFolderId, "destinationFolderId");
+  const result = await callWithUserActionFallback(
+    () => messenger.messages.move(messageIds, destinationFolderId, { isUserAction: true }),
+    () => messenger.messages.move(messageIds, destinationFolderId)
+  );
+  return {
+    moved: true,
+    messageIds,
+    destinationFolderId,
+    ...normalizeMessageListResultObject(result)
+  };
+}
+
+async function copyMessages(payload = {}) {
+  const messageIds = normalizeMessageIds(payload.messageIds);
+  const destinationFolderId = requireFolderId(payload.destinationFolderId, "destinationFolderId");
+  const result = await callWithUserActionFallback(
+    () => messenger.messages.copy(messageIds, destinationFolderId, { isUserAction: true }),
+    () => messenger.messages.copy(messageIds, destinationFolderId)
+  );
+  return {
+    copied: true,
+    messageIds,
+    destinationFolderId,
+    ...normalizeMessageListResultObject(result)
+  };
+}
+
+async function deleteMessages(payload = {}) {
+  if (payload.confirmDelete !== true) {
+    throw new Error("Refusing to delete messages without confirmDelete=true.");
+  }
+
+  const messageIds = normalizeMessageIds(payload.messageIds);
+  const deletePermanently = payload.deletePermanently === true;
+  await callWithUserActionFallback(
+    () => messenger.messages.delete(messageIds, { deletePermanently, isUserAction: true }),
+    () => messenger.messages.delete(messageIds, deletePermanently)
+  );
+  return {
+    deleted: true,
+    messageIds,
+    count: messageIds.length,
+    deletePermanently
+  };
+}
+
+async function callWithUserActionFallback(primary, fallback) {
+  try {
+    return await primary();
+  } catch (error) {
+    const message = error && typeof error === "object" && typeof error.message === "string" ? error.message : "";
+    if (error instanceof TypeError || message.includes("Incorrect argument types")) {
+      return fallback();
+    }
+    throw error;
+  }
+}
+
+function normalizeMessageIds(value) {
+  if (!Array.isArray(value)) {
+    throw new Error("messageIds must be a non-empty array of integers.");
+  }
+  const messageIds = value.filter((messageId) => Number.isInteger(messageId));
+  if (messageIds.length === 0 || messageIds.length !== value.length) {
+    throw new Error("messageIds must be a non-empty array of integers.");
+  }
+  return messageIds;
+}
+
+function requireFolderId(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} must be a folder id string.`);
+  }
+  return value;
+}
+
+function normalizeMessageListResultObject(result) {
+  if (!result || typeof result !== "object") {
+    return { messages: [], count: 0 };
+  }
+  const messages = Array.isArray(result.messages)
+    ? result.messages.map(normalizeMessageHeader)
+    : [];
+  return {
+    messages,
+    count: messages.length
+  };
+}
+
 function buildComposeDetails(payload) {
   const details = {};
 
@@ -592,10 +1052,28 @@ function normalizeMessageHeader(message) {
     read: message.read,
     flagged: message.flagged,
     junk: message.junk,
+    new: message.new,
     size: message.size,
     headerMessageId: message.headerMessageId,
     tags: message.tags || [],
     folder: message.folder ? normalizeFolder(message.folder, false) : undefined
+  };
+}
+
+function compactMessageHeader(message) {
+  const normalized = normalizeMessageHeader(message);
+  return {
+    id: normalized.id,
+    date: normalized.date,
+    author: normalized.author,
+    subject: normalized.subject,
+    recipients: normalized.recipients,
+    folderPath: normalized.folder?.path,
+    folderName: normalized.folder?.name,
+    read: normalized.read,
+    flagged: normalized.flagged,
+    tags: normalized.tags,
+    size: normalized.size
   };
 }
 
@@ -707,9 +1185,20 @@ function copyString(source, target, key) {
   }
 }
 
+function copyStringOrArray(source, target, key) {
+  if (typeof source[key] === "string" && source[key].trim()) {
+    target[key] = source[key];
+    return;
+  }
+
+  if (Array.isArray(source[key]) && source[key].every((value) => typeof value === "string" && value.trim())) {
+    target[key] = source[key];
+  }
+}
+
 function buildMessageQueryInfo(payload, limit) {
   const queryInfo = {
-    messagesPerPage: Math.min(limit, 100),
+    messagesPerPage: Math.min(limit, SEARCH_QUERY_PAGE_SIZE),
     autoPaginationTimeout: 500
   };
 
@@ -718,15 +1207,23 @@ function buildMessageQueryInfo(payload, limit) {
   copyString(payload, queryInfo, "author");
   copyString(payload, queryInfo, "recipients");
   copyString(payload, queryInfo, "body");
-  copyString(payload, queryInfo, "accountId");
-  copyString(payload, queryInfo, "folderId");
+  copyStringOrArray(payload, queryInfo, "accountId");
+  copyStringOrArray(payload, queryInfo, "folderId");
   copyString(payload, queryInfo, "headerMessageId");
 
-  if (typeof payload.read === "boolean") {
-    queryInfo.read = payload.read;
+  if (typeof payload.unread === "boolean") {
+    queryInfo.unread = payload.unread;
+  } else if (typeof payload.read === "boolean") {
+    queryInfo.unread = !payload.read;
   }
   if (typeof payload.flagged === "boolean") {
     queryInfo.flagged = payload.flagged;
+  }
+  if (typeof payload.junk === "boolean") {
+    queryInfo.junk = payload.junk;
+  }
+  if (typeof payload.new === "boolean") {
+    queryInfo.new = payload.new;
   }
   if (typeof payload.fromMe === "boolean") {
     queryInfo.fromMe = payload.fromMe;

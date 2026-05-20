@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "thunderbird-mcp",
   "display_name": "Thunderbird MCP",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Connects Claude Desktop to the local Thunderbird MCP bridge.",
-  "long_description": "A local MCP server for reading Thunderbird messages and creating Thunderbird compose drafts. It requires the Thunderbird MCP Bridge add-on and native host registration. It never sends email.",
+  "long_description": "A local MCP server for reading, searching, drafting, sending, and organizing Thunderbird messages. It requires the Thunderbird MCP Bridge add-on and native host registration. Send/delete tools require explicit confirmation arguments.",
   "author": {
     "name": "Thunderbird MCP Contributors"
   },
@@ -32,7 +32,15 @@
     },
     {
       "name": "search_messages",
-      "description": "Search Thunderbird messages using Thunderbird's local message index, including date presets, year, sender, recipient, size, tags, and attachment filters."
+      "description": "Search Thunderbird messages using compact paged results by default."
+    },
+    {
+      "name": "continue_search",
+      "description": "Return the next page from a previous message or attachment search."
+    },
+    {
+      "name": "close_search",
+      "description": "Release a previous paged search token when no more results are needed."
     },
     {
       "name": "get_message",
@@ -56,7 +64,7 @@
     },
     {
       "name": "search_attachments",
-      "description": "Search messages with attachments and filter attachment metadata."
+      "description": "Search messages with attachments using compact paged results and concurrent attachment inspection."
     },
     {
       "name": "get_attachment",
@@ -89,6 +97,42 @@
     {
       "name": "create_reply_draft",
       "description": "Open and optionally save a Thunderbird reply draft. This never sends mail."
+    },
+    {
+      "name": "send_message",
+      "description": "Compose and send or queue a new Thunderbird message, requiring confirmSend=true."
+    },
+    {
+      "name": "send_reply",
+      "description": "Create and send or queue a Thunderbird reply, requiring confirmSend=true."
+    },
+    {
+      "name": "send_current_compose",
+      "description": "Send or queue an existing compose tab, requiring confirmSend=true."
+    },
+    {
+      "name": "list_tags",
+      "description": "List Thunderbird message tags."
+    },
+    {
+      "name": "update_message",
+      "description": "Update read, flagged, junk, or tag state for a Thunderbird message."
+    },
+    {
+      "name": "archive_messages",
+      "description": "Archive messages using Thunderbird's configured archive settings."
+    },
+    {
+      "name": "move_messages",
+      "description": "Move messages to a Thunderbird folder."
+    },
+    {
+      "name": "copy_messages",
+      "description": "Copy messages to a Thunderbird folder."
+    },
+    {
+      "name": "delete_messages",
+      "description": "Delete messages through Thunderbird, requiring confirmDelete=true."
     }
   ],
   "prompts": [

@@ -8,7 +8,12 @@ The connector has three pieces:
 - a native host and local broker in `host/`
 - a stdio MCP server exposed by `thunderbird-mcp mcp`
 
-The v1 safety boundary is deliberate: Claude can read messages you ask for and create drafts, but the connector does not request permission to send email.
+The connector reads mail only through Thunderbird's local MailExtension APIs.
+It can create drafts, send messages with an explicit `confirmSend=true` tool
+argument, and organize messages with Thunderbird's own permissions.
+Search tools are optimized for old mailboxes: compact results by default,
+paged continuation tokens for deep searches, and concurrent attachment
+inspection for attachment-heavy folders.
 
 See [docs/INSTALL.md](docs/INSTALL.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 

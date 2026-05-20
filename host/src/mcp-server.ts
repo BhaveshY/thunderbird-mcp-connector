@@ -137,7 +137,7 @@ function initializeResult(params: JsonValue | undefined): JsonObject {
       version: CONNECTOR_VERSION
     },
     instructions:
-      "This local connector reads Thunderbird email only through the installed Thunderbird add-on. It can open or save drafts, but it does not send email."
+      "This local connector accesses Thunderbird only through the installed Thunderbird add-on. Use compact paged search tools for old mailboxes, then get_message/save_attachment for details. It can draft, send with explicit confirmSend=true, and organize messages with Thunderbird permissions."
   };
 }
 

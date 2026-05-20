@@ -71,6 +71,7 @@ export interface NormalizedMessageHeader {
   read?: boolean;
   flagged?: boolean;
   junk?: boolean;
+  new?: boolean;
   size?: number;
   headerMessageId?: string;
   folder?: NormalizedFolder;

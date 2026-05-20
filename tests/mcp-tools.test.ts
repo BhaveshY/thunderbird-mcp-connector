@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ATTACHMENT_SAVE_CHUNK_BYTES } from "../shared/src/constants.js";
+import { ATTACHMENT_SAVE_CHUNK_BYTES, MAX_SEARCH_LIMIT } from "../shared/src/constants.js";
 import type { JsonObject } from "../shared/src/types.js";
 
 const brokerMocks = vi.hoisted(() => ({
@@ -15,6 +15,8 @@ vi.mock("../host/src/broker-client.js", () => brokerMocks);
 import { callTool, isPathInsideOrEqual } from "../host/src/mcp-tools.js";
 
 let tempDir: string;
+const LARGE_SEARCH_LIMIT = 1000;
+const DEFAULT_SEARCH_PAGE_SIZE = 25;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "thunderbird-mcp-tools-test-"));
@@ -27,6 +29,119 @@ afterEach(async () => {
 });
 
 describe("MCP tools", () => {
+  it("allows larger message searches through to the bridge", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ messages: [], count: 0, limit: LARGE_SEARCH_LIMIT });
+
+    await callTool("search_messages", { subject: "invoice", limit: LARGE_SEARCH_LIMIT });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.search_messages", {
+      subject: "invoice",
+      limit: LARGE_SEARCH_LIMIT,
+      pageSize: DEFAULT_SEARCH_PAGE_SIZE,
+      resultFormat: "compact",
+      includeSubFolders: true
+    });
+  });
+
+  it("clamps oversized message searches to the supported maximum", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ messages: [], count: 0, limit: MAX_SEARCH_LIMIT });
+
+    await callTool("search_messages", { limit: MAX_SEARCH_LIMIT + 1 });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.search_messages", {
+      limit: MAX_SEARCH_LIMIT,
+      pageSize: DEFAULT_SEARCH_PAGE_SIZE,
+      resultFormat: "compact",
+      includeSubFolders: true
+    });
+  });
+
+  it("routes search continuation with compact paging defaults", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ messages: [], count: 0 });
+
+    await callTool("continue_search", { pageToken: "search_123" });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.continue_search", {
+      pageToken: "search_123",
+      pageSize: DEFAULT_SEARCH_PAGE_SIZE
+    });
+  });
+
+  it("clamps attachment search page size and defaults to compact results", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ attachments: [], count: 0 });
+
+    await callTool("search_attachments", {
+      author: "Aaron",
+      extension: "xlsx",
+      messageLimit: LARGE_SEARCH_LIMIT,
+      attachmentLimit: LARGE_SEARCH_LIMIT,
+      pageSize: 500
+    });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.search_attachments", {
+      author: "Aaron",
+      extension: "xlsx",
+      messageLimit: LARGE_SEARCH_LIMIT,
+      attachmentLimit: LARGE_SEARCH_LIMIT,
+      pageSize: 100,
+      resultFormat: "compact",
+      includeSubFolders: true
+    });
+  });
+
+  it("requires explicit confirmation before sending a new message", async () => {
+    await expect(
+      callTool("send_message", {
+        to: ["recipient@example.com"],
+        subject: "Hello",
+        plainTextBody: "Hi"
+      })
+    ).rejects.toMatchObject({
+      code: "SEND_NOT_CONFIRMED"
+    });
+    expect(brokerMocks.callBroker).not.toHaveBeenCalled();
+  });
+
+  it("routes confirmed new message sends through the bridge", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ sent: true, mode: "sendLater" });
+
+    const result = await callTool("send_message", {
+      to: ["recipient@example.com"],
+      subject: "Hello",
+      plainTextBody: "Hi",
+      confirmSend: true
+    });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.send_message", {
+      to: ["recipient@example.com"],
+      subject: "Hello",
+      plainTextBody: "Hi",
+      confirmSend: true,
+      mode: "sendLater"
+    });
+    expect(result.sent).toBe(true);
+  });
+
+  it("requires explicit confirmation before deleting messages", async () => {
+    await expect(callTool("delete_messages", { messageIds: [7] })).rejects.toMatchObject({
+      code: "DELETE_NOT_CONFIRMED"
+    });
+    expect(brokerMocks.callBroker).not.toHaveBeenCalled();
+  });
+
+  it("routes confirmed deletes through the bridge", async () => {
+    brokerMocks.callBroker.mockResolvedValue({ deleted: true, messageIds: [7], deletePermanently: false });
+
+    const result = await callTool("delete_messages", { messageIds: [7], confirmDelete: true });
+
+    expect(brokerMocks.callBroker).toHaveBeenCalledWith("tool.delete_messages", {
+      messageIds: [7],
+      confirmDelete: true,
+      deletePermanently: false
+    });
+    expect(result.deleted).toBe(true);
+  });
+
   it("saves attachments by explicitly requesting base64 chunks", async () => {
     const downloadPayloads: JsonObject[] = [];
     brokerMocks.callBroker.mockImplementation(async (type: string, payload: JsonObject) => {

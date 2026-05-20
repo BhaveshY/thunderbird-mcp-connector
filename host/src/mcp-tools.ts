@@ -1,8 +1,11 @@
 import {
   ATTACHMENT_SAVE_CHUNK_BYTES,
+  MAX_ATTACHMENT_SEARCH_LIMIT,
+  DEFAULT_SEARCH_PAGE_SIZE,
   DEFAULT_MAX_ATTACHMENT_BYTES,
   DEFAULT_MAX_BODY_CHARS,
   DEFAULT_SEARCH_LIMIT,
+  MAX_SEARCH_PAGE_SIZE,
   MAX_ATTACHMENT_TOOL_BYTES,
   MAX_SEARCH_LIMIT
 } from "../../shared/src/constants.js";
@@ -44,11 +47,20 @@ const messageSearchProperties: JsonObject = {
   recipients: { type: "string" },
   body: { type: "string" },
   headerMessageId: { type: "string", description: "The RFC 822 Message-ID header." },
-  accountId: { type: "string" },
-  folderId: { type: "string" },
+  accountId: {
+    anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+    description: "One account id, or multiple account ids when Thunderbird supports array filters."
+  },
+  folderId: {
+    anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+    description: "One folder id, or multiple folder ids when Thunderbird supports array filters."
+  },
   includeSubFolders: { type: "boolean", default: true },
   read: { type: "boolean" },
+  unread: { type: "boolean", description: "Only unread messages when true, only read messages when false." },
   flagged: { type: "boolean" },
+  junk: { type: "boolean" },
+  new: { type: "boolean", description: "Only messages Thunderbird currently marks as new." },
   fromMe: { type: "boolean", description: "Only messages from one of the user's identities." },
   toMe: { type: "boolean", description: "Only messages addressed to one of the user's identities." },
   minSize: { type: "integer", minimum: 0, description: "Minimum message size in bytes." },
@@ -59,6 +71,44 @@ const messageSearchProperties: JsonObject = {
     description: "Thunderbird tag keys to match, when supported by the local Thunderbird version."
   },
   ...dateFilterProperties
+};
+
+const resultFormatProperty: JsonObject = {
+  type: "string",
+  enum: ["compact", "full"],
+  default: "compact",
+  description: "Use compact for low-token search results; use full only when detailed metadata is needed."
+};
+
+const pageSizeProperty: JsonObject = {
+  type: "integer",
+  minimum: 1,
+  maximum: MAX_SEARCH_PAGE_SIZE,
+  default: DEFAULT_SEARCH_PAGE_SIZE,
+  description: "Maximum results returned in this response. Use continue_search for the next page."
+};
+
+const composeProperties: JsonObject = {
+  to: { type: "array", items: { type: "string" } },
+  cc: { type: "array", items: { type: "string" } },
+  bcc: { type: "array", items: { type: "string" } },
+  subject: { type: "string" },
+  body: { type: "string", description: "HTML body." },
+  plainTextBody: { type: "string" },
+  isPlainText: { type: "boolean", default: false }
+};
+
+const sendModeProperty: JsonObject = {
+  type: "string",
+  enum: ["sendLater", "sendNow", "default"],
+  default: "sendLater",
+  description: "sendLater queues mail in the outbox; sendNow sends immediately; default follows Thunderbird's online/offline behavior."
+};
+
+const messageIdsProperty: JsonObject = {
+  type: "array",
+  minItems: 1,
+  items: { type: "integer" }
 };
 
 export const tools: ToolDefinition[] = [
@@ -105,7 +155,42 @@ export const tools: ToolDefinition[] = [
       properties: {
         ...messageSearchProperties,
         hasAttachments: { type: "boolean", description: "Filter messages by whether Thunderbird reports attachments." },
-        limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, default: DEFAULT_SEARCH_LIMIT }
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_SEARCH_LIMIT,
+          default: DEFAULT_SEARCH_LIMIT,
+          description: "Total results to inspect across pages."
+        },
+        pageSize: pageSizeProperty,
+        resultFormat: resultFormatProperty
+      }
+    }
+  },
+  {
+    name: "continue_search",
+    title: "Continue Thunderbird Search",
+    description: "Return the next compact page from a previous paged search_messages or search_attachments result.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageToken"],
+      properties: {
+        pageToken: { type: "string" },
+        pageSize: pageSizeProperty
+      }
+    }
+  },
+  {
+    name: "close_search",
+    title: "Close Thunderbird Search",
+    description: "Release a previous paged Thunderbird search token when you do not need more results.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pageToken"],
+      properties: {
+        pageToken: { type: "string" }
       }
     }
   },
@@ -197,8 +282,22 @@ export const tools: ToolDefinition[] = [
         },
         minSize: { type: "integer", minimum: 0 },
         maxSize: { type: "integer", minimum: 0 },
-        messageLimit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, default: DEFAULT_SEARCH_LIMIT },
-        attachmentLimit: { type: "integer", minimum: 1, maximum: 200, default: 50 }
+        messageLimit: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_SEARCH_LIMIT,
+          default: DEFAULT_SEARCH_LIMIT,
+          description: "Total messages with attachments to inspect across pages."
+        },
+        attachmentLimit: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_ATTACHMENT_SEARCH_LIMIT,
+          default: 50,
+          description: "Total matching attachments to return across pages."
+        },
+        pageSize: pageSizeProperty,
+        resultFormat: resultFormatProperty
       }
     }
   },
@@ -310,13 +409,7 @@ export const tools: ToolDefinition[] = [
       type: "object",
       additionalProperties: false,
       properties: {
-        to: { type: "array", items: { type: "string" } },
-        cc: { type: "array", items: { type: "string" } },
-        bcc: { type: "array", items: { type: "string" } },
-        subject: { type: "string" },
-        body: { type: "string", description: "HTML body." },
-        plainTextBody: { type: "string" },
-        isPlainText: { type: "boolean", default: false },
+        ...composeProperties,
         saveAsDraft: { type: "boolean", default: false }
       }
     }
@@ -341,11 +434,162 @@ export const tools: ToolDefinition[] = [
         saveAsDraft: { type: "boolean", default: true }
       }
     }
+  },
+  {
+    name: "send_message",
+    title: "Send New Message",
+    description: "Compose and send a new Thunderbird message. Requires confirmSend=true. Defaults to sendLater, which queues in the outbox.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["confirmSend"],
+      properties: {
+        ...composeProperties,
+        mode: sendModeProperty,
+        confirmSend: {
+          type: "boolean",
+          const: true,
+          description: "Must be true to confirm the message may be sent or queued."
+        }
+      }
+    }
+  },
+  {
+    name: "send_reply",
+    title: "Send Reply",
+    description: "Create and send a Thunderbird reply. Requires confirmSend=true. Defaults to sendLater, which queues in the outbox.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["confirmSend"],
+      properties: {
+        messageId: { type: "integer", description: "Defaults to the currently displayed message." },
+        replyType: {
+          type: "string",
+          enum: ["replyToSender", "replyToList", "replyToAll"],
+          default: "replyToSender"
+        },
+        ...composeProperties,
+        mode: sendModeProperty,
+        confirmSend: {
+          type: "boolean",
+          const: true,
+          description: "Must be true to confirm the reply may be sent or queued."
+        }
+      }
+    }
+  },
+  {
+    name: "send_current_compose",
+    title: "Send Current Compose Window",
+    description: "Send an existing compose tab by tabId, or the active compose tab if omitted. Requires confirmSend=true.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["confirmSend"],
+      properties: {
+        tabId: { type: "integer", description: "Defaults to the active Thunderbird tab." },
+        mode: sendModeProperty,
+        confirmSend: {
+          type: "boolean",
+          const: true,
+          description: "Must be true to confirm the compose window may be sent or queued."
+        }
+      }
+    }
+  },
+  {
+    name: "list_tags",
+    title: "List Thunderbird Tags",
+    description: "List Thunderbird message tags that can be assigned with update_message.",
+    inputSchema: emptyInputSchema
+  },
+  {
+    name: "update_message",
+    title: "Update Message State",
+    description: "Mark a message read/unread, flagged/unflagged, junk/not junk, or replace its Thunderbird tag keys.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageId"],
+      properties: {
+        messageId: { type: "integer" },
+        read: { type: "boolean" },
+        flagged: { type: "boolean" },
+        junk: { type: "boolean" },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Complete replacement set of Thunderbird tag keys."
+        }
+      }
+    }
+  },
+  {
+    name: "archive_messages",
+    title: "Archive Messages",
+    description: "Archive messages using Thunderbird's configured archive settings.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageIds"],
+      properties: {
+        messageIds: messageIdsProperty
+      }
+    }
+  },
+  {
+    name: "move_messages",
+    title: "Move Messages",
+    description: "Move messages to a Thunderbird folder id returned by list_folders.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageIds", "destinationFolderId"],
+      properties: {
+        messageIds: messageIdsProperty,
+        destinationFolderId: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "copy_messages",
+    title: "Copy Messages",
+    description: "Copy messages to a Thunderbird folder id returned by list_folders.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageIds", "destinationFolderId"],
+      properties: {
+        messageIds: messageIdsProperty,
+        destinationFolderId: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "delete_messages",
+    title: "Delete Messages",
+    description: "Move messages to Trash by default, or permanently delete when deletePermanently=true. Requires confirmDelete=true.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageIds", "confirmDelete"],
+      properties: {
+        messageIds: messageIdsProperty,
+        deletePermanently: { type: "boolean", default: false },
+        confirmDelete: {
+          type: "boolean",
+          const: true,
+          description: "Must be true to confirm messages may be deleted."
+        }
+      }
+    }
   }
 ];
 
 export async function callTool(name: string, args: JsonValue | undefined): Promise<JsonObject> {
   const payload = normalizeToolArgs(name, args);
+  enforceRiskyToolConfirmation(name, payload);
 
   if (name === "status") {
     try {
@@ -388,7 +632,13 @@ function normalizeToolArgs(name: string, raw: JsonValue | undefined): JsonObject
 
   if (name === "search_messages") {
     args.limit = clampInteger(args.limit, 1, MAX_SEARCH_LIMIT, DEFAULT_SEARCH_LIMIT);
+    args.pageSize = clampInteger(args.pageSize, 1, MAX_SEARCH_PAGE_SIZE, DEFAULT_SEARCH_PAGE_SIZE);
+    args.resultFormat = args.resultFormat === "full" ? "full" : "compact";
     args.includeSubFolders = typeof args.includeSubFolders === "boolean" ? args.includeSubFolders : true;
+  }
+
+  if (name === "continue_search") {
+    args.pageSize = clampInteger(args.pageSize, 1, MAX_SEARCH_PAGE_SIZE, DEFAULT_SEARCH_PAGE_SIZE);
   }
 
   if (name === "get_raw_message") {
@@ -405,7 +655,9 @@ function normalizeToolArgs(name: string, raw: JsonValue | undefined): JsonObject
 
   if (name === "search_attachments") {
     args.messageLimit = clampInteger(args.messageLimit, 1, MAX_SEARCH_LIMIT, DEFAULT_SEARCH_LIMIT);
-    args.attachmentLimit = clampInteger(args.attachmentLimit, 1, 200, 50);
+    args.attachmentLimit = clampInteger(args.attachmentLimit, 1, MAX_ATTACHMENT_SEARCH_LIMIT, 50);
+    args.pageSize = clampInteger(args.pageSize, 1, MAX_SEARCH_PAGE_SIZE, DEFAULT_SEARCH_PAGE_SIZE);
+    args.resultFormat = args.resultFormat === "full" ? "full" : "compact";
     args.includeSubFolders = typeof args.includeSubFolders === "boolean" ? args.includeSubFolders : true;
   }
 
@@ -445,11 +697,43 @@ function normalizeToolArgs(name: string, raw: JsonValue | undefined): JsonObject
     args.saveAsDraft = typeof args.saveAsDraft === "boolean" ? args.saveAsDraft : true;
   }
 
+  if (name === "send_message" || name === "send_reply" || name === "send_current_compose") {
+    args.mode = isSendMode(args.mode) ? args.mode : "sendLater";
+  }
+
+  if (name === "send_reply") {
+    args.replyType = typeof args.replyType === "string" ? args.replyType : "replyToSender";
+  }
+
+  if (name === "delete_messages") {
+    args.deletePermanently = typeof args.deletePermanently === "boolean" ? args.deletePermanently : false;
+  }
+
   if (name === "open_compose") {
     args.saveAsDraft = typeof args.saveAsDraft === "boolean" ? args.saveAsDraft : false;
   }
 
   return args;
+}
+
+function isSendMode(value: JsonValue | undefined): boolean {
+  return value === "sendLater" || value === "sendNow" || value === "default";
+}
+
+function enforceRiskyToolConfirmation(name: string, args: JsonObject): void {
+  if ((name === "send_message" || name === "send_reply" || name === "send_current_compose") && args.confirmSend !== true) {
+    throw new ConnectorError(
+      "Refusing to send mail without confirmSend=true.",
+      "SEND_NOT_CONFIRMED"
+    );
+  }
+
+  if (name === "delete_messages" && args.confirmDelete !== true) {
+    throw new ConnectorError(
+      "Refusing to delete messages without confirmDelete=true.",
+      "DELETE_NOT_CONFIRMED"
+    );
+  }
 }
 
 function clampInteger(value: JsonValue | undefined, min: number, max: number, fallback: number): number {
