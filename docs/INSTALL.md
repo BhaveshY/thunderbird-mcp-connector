@@ -18,7 +18,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps
 
 ## Build
 
-Use Node 20 or newer.
+Use Node 22.5 or newer (the durable reply ledger uses the built-in SQLite API).
 
 ```sh
 npm install
@@ -52,7 +52,7 @@ Build the XPI:
 npm run package:xpi
 ```
 
-Install `build/thunderbird-mcp-bridge-0.1.3.xpi` through Thunderbird:
+Install `build/thunderbird-mcp-bridge-0.2.0.xpi` through Thunderbird:
 
 1. Open Thunderbird.
 2. Open Add-ons Manager.

@@ -9,8 +9,10 @@ The connector has three pieces:
 - a stdio MCP server exposed by `thunderbird-mcp mcp`
 
 The connector reads mail only through Thunderbird's local MailExtension APIs.
-It can create drafts, send messages with an explicit `confirmSend=true` tool
-argument, and organize messages with Thunderbird's own permissions.
+It can create drafts and organize messages with Thunderbird's own permissions.
+Autonomous replies use `preview_reply` followed by a content-bound, persistently
+idempotent `send_reply`; uncertain outcomes must be resolved with
+`reconcile_send`. General compose sends still require explicit confirmation.
 Search tools are optimized for old mailboxes: compact results by default,
 paged continuation tokens for deep searches, and concurrent attachment
 inspection for attachment-heavy folders.

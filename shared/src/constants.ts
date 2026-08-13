@@ -2,10 +2,12 @@ export const EXTENSION_ID = "thunderbird-mcp@local";
 export const NATIVE_HOST_NAME = "com.thunderbird_mcp.bridge";
 export const MCP_SERVER_NAME = "thunderbird-mcp";
 export const MCP_SERVER_TITLE = "Thunderbird MCP";
-export const CONNECTOR_VERSION = "0.1.3";
+export const CONNECTOR_VERSION = "0.2.0";
 
 export const STATE_DIR_NAME = ".thunderbird-mcp";
 export const BROKER_STATE_FILE = "broker.json";
+export const REPLY_LEDGER_FILE = "reply-ledger.sqlite";
+export const PREVIEW_TTL_MS = 5 * 60 * 1000;
 export const DEFAULT_NATIVE_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_BODY_CHARS = 100_000;
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 1_000_000;

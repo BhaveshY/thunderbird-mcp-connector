@@ -94,3 +94,23 @@ export interface NormalizedMessage extends NormalizedMessageHeader {
     message?: NormalizedMessageHeader;
   }>;
 }
+
+export type ReplyOperationStatus = "prepared" | "sending" | "sent" | "queued" | "failed" | "unknown";
+
+export interface SenderIdentity {
+  accountId: string;
+  identityId: string;
+  address: string;
+}
+
+export interface SendReceipt extends JsonObject {
+  operationId: string;
+  status: ReplyOperationStatus;
+  outgoingRfcMessageId: string | null;
+  senderIdentity: JsonObject;
+  recipients: JsonObject;
+  sentFolderMessage: JsonObject | null;
+  timestamp: string;
+  requestId: string | null;
+  draftHash: string;
+}

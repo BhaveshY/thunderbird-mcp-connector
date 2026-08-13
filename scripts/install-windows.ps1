@@ -118,25 +118,25 @@ function Find-Npm {
   return Find-Executable -Names @("npm.cmd", "npm") -ExtraPaths $extra
 }
 
-function Get-NodeMajor {
+function Get-NodeVersion {
   param([string]$NodePath)
   try {
     $version = & $NodePath -p "process.versions.node"
-    return [int]($version.Split(".")[0])
+    return [version]$version
   } catch {
-    return 0
+    return [version]"0.0.0"
   }
 }
 
 function Ensure-Node {
   $node = Find-Node
-  if (-not $node -or (Get-NodeMajor $node) -lt 20) {
-    Install-WingetPackage -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js 20 or newer"
+  if (-not $node -or (Get-NodeVersion $node) -lt [version]"22.5.0") {
+    Install-WingetPackage -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js 22.5 or newer"
     $node = Find-Node
   }
 
-  if (-not $node -or (Get-NodeMajor $node) -lt 20) {
-    throw "Node.js 20 or newer is required but was not found after installation."
+  if (-not $node -or (Get-NodeVersion $node) -lt [version]"22.5.0") {
+    throw "Node.js 22.5 or newer is required but was not found after installation."
   }
 
   $npm = Find-Npm

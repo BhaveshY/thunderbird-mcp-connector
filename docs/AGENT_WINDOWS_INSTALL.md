@@ -18,7 +18,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps
 
 The script handles:
 
-- Node.js 20+ detection and winget install when missing.
+- Node.js 22.5+ detection and winget install when missing.
 - Thunderbird detection and winget install when missing.
 - `npm install`, build, tests, XPI packaging, and native host registration.
 - Thunderbird add-on staging in the active/default Thunderbird profile.
@@ -54,7 +54,7 @@ Next steps:
 2. If Thunderbird asks to approve the Thunderbird MCP Bridge add-on, approve it.
 3. In Claude, ask: "Use Thunderbird MCP to check status."
 
-It reads mail only when you ask. It can create drafts and can send mail only when a tool call explicitly provides `confirmSend=true`.
+It reads mail only when asked. Autonomous replies require a short-lived preview, exact hashes and sender identity, persistent idempotency, `sendNow=true`, and `confirmSend=true`; uncertain outcomes require reconciliation.
 ```
 
 Do not paste message bodies, addresses, or private mail content into the final

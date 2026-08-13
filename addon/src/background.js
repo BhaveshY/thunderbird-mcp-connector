@@ -10,10 +10,14 @@ const SEARCH_SESSION_TTL_MS = 10 * 60 * 1000;
 const MAX_SEARCH_SESSIONS = 20;
 const DEFAULT_MAX_ATTACHMENT_BYTES = 1000000;
 const MAX_ATTACHMENT_TOOL_BYTES = 5000000;
+const CONNECTOR_VERSION = "0.2.0";
+const PREVIEW_TTL_MS = 5 * 60 * 1000;
+const SAFE_OPERATION_PREFIX = "safeReplyOperation:";
 
 let nativePort = null;
 let reconnectTimer = null;
 const searchSessions = new Map();
+const replyOperationLocks = new Map();
 
 connectNativeHost();
 
@@ -77,12 +81,16 @@ async function handleNativeRequest(request) {
 
 async function dispatch(type, payload) {
   switch (type) {
+    case "tool.connector_status":
+      return connectorStatus();
     case "tool.get_current_message":
       return getCurrentMessage(payload);
     case "tool.get_current_messages":
       return getCurrentMessages(payload);
     case "tool.search_messages":
       return searchMessages(payload);
+    case "tool.poll_messages":
+      return pollMessages(payload);
     case "tool.continue_search":
       return continueSearch(payload);
     case "tool.close_search":
@@ -115,6 +123,12 @@ async function dispatch(type, payload) {
       return sendMessage(payload);
     case "tool.send_reply":
       return sendReply(payload);
+    case "tool.preview_reply":
+      return previewReply(payload);
+    case "tool.get_send_status":
+      return getSendStatus(payload);
+    case "tool.reconcile_send":
+      return reconcileSend(payload);
     case "tool.send_current_compose":
       return sendCurrentCompose(payload);
     case "tool.list_tags":
@@ -248,7 +262,8 @@ async function getMessageHeaders(payload = {}) {
     const headers = await messenger.messages.getHeaders(messageId);
     return {
       message: normalizeMessageHeader(message),
-      headers
+      headers,
+      normalizedSafetyHeaders: normalizeSafetyHeaders(headers)
     };
   }
 
@@ -261,6 +276,7 @@ async function getMessageHeaders(payload = {}) {
   return {
     message: normalizeMessageHeader(message),
     headers: full.headers || {},
+    normalizedSafetyHeaders: normalizeSafetyHeaders(full.headers || {}),
     fallback: true
   };
 }
@@ -761,6 +777,105 @@ async function listFolders(payload = {}) {
   };
 }
 
+async function pollMessages(payload = {}) {
+  const limit = clampInteger(payload.limit, 1, 100, 25);
+  const watermark = payload.watermark && typeof payload.watermark === "object"
+    ? {
+        date: String(payload.watermark.date || ""),
+        accountId: String(payload.watermark.accountId || ""),
+        folderId: String(payload.watermark.folderId || ""),
+        rfcMessageId: String(payload.watermark.rfcMessageId || ""),
+        messageId: Number(payload.watermark.messageId)
+      }
+    : null;
+  if (watermark && (
+    !Number.isInteger(watermark.messageId) || !Number.isFinite(Date.parse(watermark.date)) ||
+    !watermark.accountId || !watermark.folderId || !watermark.rfcMessageId
+  )) {
+    throw codedError("watermark requires date, accountId, folderId, rfcMessageId, and integer messageId.", "INVALID_ARGUMENTS");
+  }
+  const queryInfo = buildMessageQueryInfo({
+    accountId: payload.accountId,
+    folderId: payload.folderId,
+    includeSubFolders: payload.includeSubFolders !== false,
+    ...(watermark ? { fromDate: watermark.date } : {})
+  }, SEARCH_QUERY_PAGE_SIZE);
+  const collected = [];
+  let page = await messenger.messages.query(queryInfo);
+  for (;;) {
+    collected.push(...(page.messages || []));
+    if (!page.id) break;
+    page = await messenger.messages.continueList(page.id);
+  }
+  const after = collected
+    .map(normalizeMessageHeader)
+    .filter((message) => Boolean(message.date && message.folder?.accountId && message.folder?.id && message.headerMessageId))
+    .filter((message) => !watermark || compareWatermark(message, watermark) > 0)
+    .sort((left, right) => compareWatermark(left, right))
+    .slice(0, limit);
+  const messages = [];
+  for (const message of after) {
+    const headerResult = await getMessageHeaders({ messageId: message.id });
+    messages.push({ ...message, normalizedSafetyHeaders: headerResult.normalizedSafetyHeaders });
+  }
+  const last = messages[messages.length - 1];
+  return {
+    messages,
+    count: messages.length,
+    watermark: last ? {
+      date: last.date,
+      accountId: last.folder.accountId,
+      folderId: last.folder.id,
+      rfcMessageId: last.headerMessageId,
+      messageId: last.id
+    } : watermark,
+    order: "date_asc,accountId_asc,folderId_asc,rfcMessageId_asc,messageId_asc"
+  };
+}
+
+function compareWatermark(message, watermark) {
+  const left = [
+    new Date(message.date || "").toISOString(), message.folder?.accountId || message.accountId || "",
+    message.folder?.id || message.folderId || "", message.headerMessageId || message.rfcMessageId || "",
+    Number(message.id ?? message.messageId)
+  ];
+  const right = [
+    new Date(watermark.date || "").toISOString(), watermark.folder?.accountId || watermark.accountId || "",
+    watermark.folder?.id || watermark.folderId || "", watermark.headerMessageId || watermark.rfcMessageId || "",
+    Number(watermark.id ?? watermark.messageId)
+  ];
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] === right[index]) continue;
+    return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+async function connectorStatus() {
+  const accounts = await messenger.accounts.list(false);
+  const identities = accounts.flatMap((account) => (account.identities || []).map((identity) => ({
+    accountId: account.id,
+    identityId: identity.id,
+    name: identity.name,
+    address: identity.email
+  }))).sort((left, right) => `${left.accountId}\0${left.identityId}\0${left.address}`.localeCompare(`${right.accountId}\0${right.identityId}\0${right.address}`));
+  const uniqueIdentities = identities.filter((identity, index) => index === 0 ||
+    `${identity.accountId}\0${identity.identityId}\0${identity.address}` !== `${identities[index - 1].accountId}\0${identities[index - 1].identityId}\0${identities[index - 1].address}`);
+  return {
+    connectorName: "thunderbird-mcp",
+    connectorVersion: CONNECTOR_VERSION,
+    profileFingerprint: await getProfileFingerprint(),
+    identities: uniqueIdentities,
+    capabilities: {
+      previewReply: true,
+      persistentIdempotency: true,
+      sendReconciliation: true,
+      correlationMetadata: true,
+      loopPreventionHeaders: true
+    }
+  };
+}
+
 async function openCompose(payload = {}) {
   const details = buildComposeDetails(payload);
   const tab = await messenger.compose.beginNew(undefined, details);
@@ -815,22 +930,175 @@ async function sendMessage(payload = {}) {
 }
 
 async function sendReply(payload = {}) {
-  ensureSendConfirmed(payload);
-  const messageId = await resolveMessageId(payload.messageId);
-  const replyType = ["replyToSender", "replyToList", "replyToAll"].includes(payload.replyType)
-    ? payload.replyType
-    : "replyToSender";
-  const details = buildComposeDetails(payload);
-  const tab = await messenger.compose.beginReply(messageId, replyType, details);
-  const result = await sendComposeTab(tab.id, payload);
+  const lockKey = `${payload.messageId}:${payload.operationId}`;
+  const sourceLockKey = `source:${payload.messageId}`;
+  const existingLock = replyOperationLocks.get(lockKey);
+  if (existingLock) return existingLock;
+  if (replyOperationLocks.has(sourceLockKey)) {
+    throw codedError("A reply for this source message is already being dispatched.", "RECONCILIATION_REQUIRED");
+  }
+  const running = sendReplyLocked(payload).finally(() => {
+    replyOperationLocks.delete(lockKey);
+    replyOperationLocks.delete(sourceLockKey);
+  });
+  replyOperationLocks.set(lockKey, running);
+  replyOperationLocks.set(sourceLockKey, running);
+  return running;
+}
 
-  return {
-    tabId: tab.id,
-    messageId,
-    replyType,
-    sent: true,
-    ...result
+async function sendReplyLocked(payload = {}) {
+  validateSafeReplyPayload(payload);
+  const stored = await readOperation(payload.operationId);
+  if (stored) {
+    if (stored.requestHash !== await safeRequestHash(payload)) {
+      throw codedError("Operation id was reused with different content.", "IDEMPOTENCY_CONFLICT");
+    }
+    return publicReceipt(stored.receipt);
+  }
+
+  const preview = await readPreview(payload.previewToken);
+  await assertSafePreview(payload, preview);
+  const operationId = payload.operationId;
+  const requestHash = await safeRequestHash(payload);
+  const sourceKey = await sha256Hex(stableJson({ profileFingerprint: preview.profileFingerprint, source: preview.source }));
+  const unresolved = await findUnresolvedSourceOperation(sourceKey, operationId);
+  if (unresolved) throw codedError(`Source has unresolved operation ${unresolved}.`, "RECONCILIATION_REQUIRED");
+  if (Date.parse(preview.expiresAt) <= Date.now()) throw codedError("Preview token expired before the send claim.", "PREVIEW_EXPIRED");
+  const base = receiptBase(payload, preview, "sending");
+  await writeOperation(operationId, { requestHash, sourceKey, status: "sending", receipt: base, updatedAt: new Date().toISOString() });
+
+  let tab;
+  let sendInvoked = false;
+  try {
+    const composeDetails = safeBodyDetails(payload);
+    composeDetails.identityId = payload.senderIdentity.identityId;
+    composeDetails.customHeaders = [
+      { name: "X-Thunderbird-MCP-Operation-ID", value: operationId },
+      { name: "X-Thunderbird-MCP-Draft-Hash", value: payload.draftHash },
+      { name: "X-Thunderbird-MCP-Profile", value: preview.profileFingerprint },
+      { name: "X-Thunderbird-MCP-Source", value: await sha256Hex(preview.source.rfcMessageId) },
+      { name: "X-Thunderbird-MCP-Envelope", value: preview.envelopeHash },
+      ...(payload.requestId ? [{ name: "X-Thunderbird-MCP-Request-ID", value: payload.requestId }] : [])
+    ];
+    tab = await messenger.compose.beginReply(payload.messageId, "replyToSender", composeDetails);
+    const resolved = await messenger.compose.getComposeDetails(tab.id);
+    await assertResolvedCompose(preview, resolved, payload.senderIdentity, operationId, payload.requestId || null);
+    const attachments = messenger.compose.listAttachments ? await messenger.compose.listAttachments(tab.id) : [];
+    if (attachments.length !== 0) throw codedError("Safe replies cannot contain attachments.", "ATTACHMENT_FORBIDDEN");
+    if (Date.parse(preview.expiresAt) <= Date.now()) throw codedError("Preview expired at the final compose mutation boundary.", "PREVIEW_EXPIRED");
+
+    sendInvoked = true;
+    const result = await messenger.compose.sendMessage(tab.id, { mode: "sendNow" });
+    const messages = result && Array.isArray(result.messages) ? result.messages.map(normalizeMessageHeader) : [];
+    const actualMode = result && typeof result.mode === "string" ? result.mode : "sendNow";
+    const outgoingRfcMessageId = result && typeof result.headerMessageId === "string" && result.headerMessageId
+      ? result.headerMessageId
+      : null;
+    const status = actualMode === "sendLater" ? "queued" : outgoingRfcMessageId ? "sent" : "unknown";
+    const outgoing = messages.slice().sort((left, right) => Number(left.id) - Number(right.id))[0] || null;
+    const receipt = {
+      ...receiptBase(payload, preview, status),
+      outgoingRfcMessageId,
+      sentFolderMessage: outgoing ? { messageId: outgoing.id, folder: outgoing.folder || null } : null,
+      thunderbirdMode: actualMode
+    };
+    await writeOperation(operationId, { requestHash, sourceKey, status, receipt, updatedAt: new Date().toISOString() });
+    return publicReceipt(receipt);
+  } catch (error) {
+    const status = sendInvoked ? "unknown" : "failed";
+    const receipt = { ...base, status, timestamp: new Date().toISOString(), error: String(error?.message || error) };
+    await writeOperation(operationId, { requestHash, sourceKey, status, receipt, updatedAt: new Date().toISOString() });
+    if (!sendInvoked && tab) await messenger.tabs.remove(tab.id).catch(() => undefined);
+    return publicReceipt(receipt);
+  }
+}
+
+async function previewReply(payload = {}) {
+  validateSafePreviewPayload(payload);
+  const identity = await resolveExactIdentity(payload.senderIdentity);
+  const source = await messenger.messages.get(payload.messageId);
+  if (!source.headerMessageId || !source.folder?.accountId || !source.folder?.id) {
+    throw codedError("Source message must expose stable account, folder, and RFC Message-ID metadata.", "UNSTABLE_SOURCE_MESSAGE");
+  }
+  const profileFingerprint = await getProfileFingerprint();
+  const headersResult = await getMessageHeaders({ messageId: payload.messageId });
+  const headers = normalizeSafetyHeaders(headersResult.headers || {});
+  const details = safeBodyDetails(payload);
+  details.identityId = identity.id;
+  const tab = await messenger.compose.beginReply(payload.messageId, "replyToSender", details);
+  try {
+    const resolved = await messenger.compose.getComposeDetails(tab.id);
+    if (resolved.identityId !== identity.id) {
+      throw codedError("Thunderbird resolved a different sender identity.", "SENDER_IDENTITY_MISMATCH");
+    }
+    const resolvedFrom = parseSingleMailbox(resolved.from);
+    if (resolvedFrom !== String(identity.email).toLowerCase()) throw codedError("Thunderbird resolved From does not match the requested identity address.", "SENDER_IDENTITY_MISMATCH");
+    const resolvedCompose = normalizeResolvedCompose(resolved);
+    const bodyHash = await sha256Hex(normalizeBody(payload.body));
+    const envelope = {
+      messageId: payload.messageId,
+      replyType: "replyToSender",
+      from: { accountId: identity.accountId, identityId: identity.id, address: resolvedFrom },
+      to: normalizeAddresses(resolved.to),
+      cc: normalizeAddresses(resolved.cc),
+      bcc: normalizeAddresses(resolved.bcc),
+      subject: resolved.subject || "",
+      inReplyTo: source.headerMessageId || headerFirst(headersResult.headers, "message-id") || null,
+      references: mergeReferences(headerValues(headersResult.headers, "references"), source.headerMessageId),
+      source: {
+        accountId: source.folder.accountId,
+        folderId: source.folder.id,
+        messageId: source.id,
+        rfcMessageId: source.headerMessageId
+      },
+      profileFingerprint,
+      bodyFormat: payload.bodyFormat,
+      bodyHash,
+      requestId: payload.requestId || null,
+      safetyHeaders: headers
+    };
+    const envelopeHash = await sha256Hex(stableJson({ from: envelope.from, to: envelope.to, cc: envelope.cc, bcc: envelope.bcc, subject: envelope.subject }));
+    const resolvedBodyHash = await sha256Hex(resolvedCompose.body);
+    const draftHash = await sha256Hex(stableJson({ envelopeHash, resolvedBodyHash, bodyFormat: resolvedCompose.bodyFormat }));
+    const previewHash = await sha256Hex(stableJson({ ...envelope, envelopeHash, resolvedBodyHash, draftHash }));
+    const previewToken = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
+    const expiresAt = new Date(Date.now() + PREVIEW_TTL_MS).toISOString();
+    const result = { ...envelope, envelopeHash, resolvedBodyHash, draftHash, previewHash, previewToken, expiresAt, resolvedBody: resolvedCompose.body };
+    const storedPreview = { ...result };
+    delete storedPreview.previewToken;
+    await messenger.storage.local.set({ [`safeReplyPreview:${await sha256Hex(previewToken)}`]: storedPreview });
+    const publicResult = { ...result };
+    delete publicResult.resolvedBody;
+    return publicResult;
+  } finally {
+    await messenger.tabs.remove(tab.id).catch(() => undefined);
+  }
+}
+
+async function getSendStatus(payload = {}) {
+  const operation = await readOperation(payload.operationId);
+  if (!operation) throw codedError("Unknown reply operation.", "OPERATION_NOT_FOUND");
+  return publicReceipt(operation.receipt);
+}
+
+async function reconcileSend(payload = {}) {
+  const operation = await readOperation(payload.operationId);
+  if (!operation) throw codedError("Unknown reply operation.", "OPERATION_NOT_FOUND");
+  if (["sent", "failed"].includes(operation.status)) return publicReceipt(operation.receipt);
+
+  const found = await findCorrelatedMessage(operation.receipt);
+  if (!found) return publicReceipt(operation.receipt);
+  const normalized = normalizeMessageHeader(found.message);
+  const receipt = {
+    ...operation.receipt,
+    status: found.status,
+    outgoingRfcMessageId: normalized.headerMessageId || null,
+    sentFolderMessage: { messageId: normalized.id, folder: normalized.folder || null },
+    timestamp: new Date().toISOString(),
+    evidence: found.evidence
   };
+  await writeOperation(payload.operationId, { ...operation, status: found.status, receipt, updatedAt: new Date().toISOString() });
+  return publicReceipt(receipt);
 }
 
 async function sendCurrentCompose(payload = {}) {
@@ -844,6 +1112,295 @@ async function sendCurrentCompose(payload = {}) {
     ...result
   };
 }
+
+function validateSafePreviewPayload(payload) {
+  if (!Number.isInteger(payload.messageId)) throw codedError("messageId must be an explicit integer.", "INVALID_ARGUMENTS");
+  if (payload.replyType !== "replyToSender") throw codedError("replyType must be replyToSender.", "INVALID_ARGUMENTS");
+  if (!payload.senderIdentity || typeof payload.senderIdentity.accountId !== "string" || typeof payload.senderIdentity.identityId !== "string" || typeof payload.senderIdentity.address !== "string") {
+    throw codedError("Exact senderIdentity is required.", "INVALID_ARGUMENTS");
+  }
+  if (typeof payload.body !== "string" || !["text/plain", "text/html"].includes(payload.bodyFormat)) {
+    throw codedError("Exact body and bodyFormat are required.", "INVALID_ARGUMENTS");
+  }
+  if (payload.requestId !== undefined && (typeof payload.requestId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(payload.requestId))) {
+    throw codedError("requestId contains unsafe characters.", "INVALID_REQUEST_ID");
+  }
+  const forbidden = ["to", "cc", "bcc", "subject", "attachments", "attachment", "replyTo", "headers"];
+  if (forbidden.some((field) => Object.hasOwn(payload, field))) {
+    throw codedError("Recipient, subject, header, and attachment overrides are forbidden for safe replies.", "OVERRIDE_FORBIDDEN");
+  }
+}
+
+function validateSafeReplyPayload(payload) {
+  validateSafePreviewPayload(payload);
+  if (payload.confirmSend !== true || payload.sendNow !== true) {
+    throw codedError("confirmSend and sendNow must both be true.", "SEND_NOT_CONFIRMED");
+  }
+  for (const field of ["operationId", "idempotencyKey", "previewToken", "previewHash", "bodyHash", "draftHash"]) {
+    if (typeof payload[field] !== "string" || !payload[field]) throw codedError(`${field} is required.`, "INVALID_ARGUMENTS");
+  }
+}
+
+function safeBodyDetails(payload) {
+  return payload.bodyFormat === "text/plain"
+    ? { isPlainText: true, plainTextBody: payload.body }
+    : { isPlainText: false, body: payload.body };
+}
+
+async function resolveExactIdentity(expected) {
+  const accounts = await messenger.accounts.list(false);
+  const account = accounts.find((candidate) => candidate.id === expected.accountId);
+  const identity = (account?.identities || []).find((candidate) => candidate.id === expected.identityId);
+  if (!identity || String(identity.email).toLowerCase() !== expected.address.trim().toLowerCase()) {
+    throw codedError("Sender account, identity id, and address do not match an available Thunderbird identity.", "SENDER_IDENTITY_MISMATCH");
+  }
+  return { ...identity, accountId: account.id };
+}
+
+async function assertSafePreview(payload, preview) {
+  if (!preview) throw codedError("Preview token is unknown.", "PREVIEW_NOT_FOUND");
+  if (Date.parse(preview.expiresAt) <= Date.now()) throw codedError("Preview token has expired.", "PREVIEW_EXPIRED");
+  const identity = await resolveExactIdentity(payload.senderIdentity);
+  const source = await messenger.messages.get(payload.messageId);
+  const profileFingerprint = await getProfileFingerprint();
+  const bodyHash = await sha256Hex(normalizeBody(payload.body));
+  if (
+    preview.messageId !== payload.messageId || preview.replyType !== "replyToSender" ||
+    preview.from.accountId !== identity.accountId || preview.from.identityId !== identity.id || preview.from.address.toLowerCase() !== identity.email.toLowerCase() ||
+    preview.profileFingerprint !== profileFingerprint ||
+    preview.source.accountId !== source.folder?.accountId || preview.source.folderId !== source.folder?.id ||
+    preview.source.rfcMessageId !== source.headerMessageId ||
+    preview.bodyFormat !== payload.bodyFormat || preview.bodyHash !== bodyHash ||
+    preview.bodyHash !== payload.bodyHash || preview.draftHash !== payload.draftHash || preview.previewHash !== payload.previewHash
+  ) throw codedError("Reply content or envelope differs from its preview.", "PREVIEW_MISMATCH");
+}
+
+async function assertResolvedCompose(preview, resolved, senderIdentity, operationId, requestId) {
+  const same = (left, right) => stableJson(normalizeAddresses(left)) === stableJson(normalizeAddresses(right));
+  const body = normalizeResolvedCompose(resolved);
+  const headers = normalizeCustomHeaders(resolved.customHeaders);
+  const expectedHeaders = {
+    "x-thunderbird-mcp-operation-id": operationId,
+    "x-thunderbird-mcp-draft-hash": preview.draftHash,
+    "x-thunderbird-mcp-profile": preview.profileFingerprint,
+    "x-thunderbird-mcp-source": await sha256Hex(preview.source.rfcMessageId),
+    "x-thunderbird-mcp-envelope": preview.envelopeHash,
+    ...(requestId ? { "x-thunderbird-mcp-request-id": requestId } : {})
+  };
+  if (
+    resolved.identityId !== senderIdentity.identityId ||
+    parseSingleMailbox(resolved.from) !== String(senderIdentity.address).toLowerCase() ||
+    !same(resolved.to, preview.to) || !same(resolved.cc, preview.cc) || !same(resolved.bcc, preview.bcc) ||
+    String(resolved.subject || "") !== preview.subject ||
+    body.bodyFormat !== preview.bodyFormat || body.body !== preview.resolvedBody ||
+    Object.entries(expectedHeaders).some(([name, value]) => headers[name] !== value)
+  ) throw codedError("Thunderbird final compose body, sender, envelope, or correlation headers differ from preview.", "COMPOSE_MUTATED");
+}
+
+function parseSingleMailbox(value) {
+  const raw = Array.isArray(value) ? (value.length === 1 ? value[0] : "") : value;
+  if (typeof raw !== "string" || raw.includes(",") || raw.includes("\n") || raw.includes("\r")) throw codedError("Resolved From must contain exactly one valid mailbox.", "INVALID_RESOLVED_FROM");
+  const trimmed = raw.trim();
+  const angle = trimmed.match(/^[^<>]*<([^<>]+)>$/);
+  const address = (angle ? angle[1] : trimmed).trim().toLowerCase();
+  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(address)) throw codedError("Resolved From mailbox is invalid.", "INVALID_RESOLVED_FROM");
+  return address;
+}
+
+function normalizeResolvedCompose(resolved) {
+  const isPlainText = resolved.isPlainText === true;
+  return {
+    bodyFormat: isPlainText ? "text/plain" : "text/html",
+    body: normalizeBody(isPlainText ? String(resolved.plainTextBody || "") : String(resolved.body || ""))
+  };
+}
+
+function normalizeBody(value) { return String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n"); }
+
+function normalizeCustomHeaders(value) {
+  const result = {};
+  for (const header of Array.isArray(value) ? value : []) {
+    if (header && typeof header.name === "string" && typeof header.value === "string") result[header.name.toLowerCase()] = header.value;
+  }
+  return result;
+}
+
+function receiptBase(payload, preview, status) {
+  return {
+    operationId: payload.operationId,
+    status,
+    outgoingRfcMessageId: null,
+    senderIdentity: { ...payload.senderIdentity },
+    recipients: { to: preview.to, cc: preview.cc, bcc: preview.bcc },
+    sentFolderMessage: null,
+    timestamp: new Date().toISOString(),
+    draftHash: payload.draftHash,
+    correlation: {
+      profileFingerprint: preview.profileFingerprint,
+      sourceRfcMessageId: preview.source.rfcMessageId,
+      sourceHash: null,
+      envelopeHash: preview.envelopeHash
+    },
+    ...(payload.requestId ? { requestId: payload.requestId } : {})
+  };
+}
+
+async function readPreview(token) {
+  const key = `safeReplyPreview:${await sha256Hex(token)}`;
+  const stored = await messenger.storage.local.get(key);
+  return stored[key] || null;
+}
+
+async function readOperation(operationId) {
+  if (typeof operationId !== "string" || !operationId) return null;
+  const key = `${SAFE_OPERATION_PREFIX}${operationId}`;
+  const stored = await messenger.storage.local.get(key);
+  return stored[key] || null;
+}
+
+async function writeOperation(operationId, value) {
+  await messenger.storage.local.set({ [`${SAFE_OPERATION_PREFIX}${operationId}`]: value });
+}
+
+async function findUnresolvedSourceOperation(sourceKey, exceptOperationId) {
+  const all = await messenger.storage.local.get(null);
+  for (const [key, operation] of Object.entries(all)) {
+    if (!key.startsWith(SAFE_OPERATION_PREFIX) || key === `${SAFE_OPERATION_PREFIX}${exceptOperationId}`) continue;
+    if (operation?.status === "unknown" || (operation?.sourceKey === sourceKey && ["sending", "queued"].includes(operation.status))) {
+      return key.slice(SAFE_OPERATION_PREFIX.length);
+    }
+  }
+  return null;
+}
+
+function publicReceipt(receipt) {
+  return { ...receipt, status: ["prepared", "sending"].includes(receipt?.status) ? "unknown" : receipt?.status };
+}
+
+async function safeRequestHash(payload) {
+  const copy = { ...payload };
+  delete copy.operationId;
+  return sha256Hex(stableJson(copy));
+}
+
+async function findCorrelatedMessage(receipt) {
+  const operationId = receipt.operationId;
+  const draftHash = receipt.draftHash;
+  const requestId = receipt.requestId || null;
+  const binding = receipt.correlation || {};
+  const sourceHash = await sha256Hex(binding.sourceRfcMessageId || "");
+  const accounts = await messenger.accounts.list(true);
+  const folders = [];
+  const visit = (folder) => {
+    if (!folder) return;
+    const special = folder.specialUse || [];
+    if (special.includes("sent") || special.includes("outbox") || folder.type === "sent" || folder.type === "outbox") folders.push(folder);
+    for (const child of folder.subFolders || []) visit(child);
+  };
+  for (const account of accounts) visit(account.rootFolder);
+
+  const matches = [];
+  for (const folder of folders) {
+    let page = await messenger.messages.query({ folderId: folder.id, messagesPerPage: 100 });
+    for (;;) {
+      for (const message of page.messages || []) {
+        const headers = messenger.messages.getHeaders
+          ? await messenger.messages.getHeaders(message.id)
+          : (await messenger.messages.getFull(message.id, { decodeHeaders: true })).headers || {};
+        if (
+          headerValues(headers, "x-thunderbird-mcp-operation-id").includes(operationId) &&
+          headerValues(headers, "x-thunderbird-mcp-draft-hash").includes(draftHash) &&
+          headerValues(headers, "x-thunderbird-mcp-profile").includes(binding.profileFingerprint) &&
+          headerValues(headers, "x-thunderbird-mcp-source").includes(sourceHash) &&
+          headerValues(headers, "x-thunderbird-mcp-envelope").includes(binding.envelopeHash) &&
+          (!requestId || headerValues(headers, "x-thunderbird-mcp-request-id").includes(requestId))
+        ) {
+          const isOutbox = (folder.specialUse || []).includes("outbox") || folder.type === "outbox";
+          const normalized = normalizeMessageHeader(message);
+          if (!envelopeMatchesReceipt(normalized, receipt)) continue;
+          matches.push({ message, status: isOutbox ? "queued" : "sent", folderId: folder.id });
+        }
+      }
+      if (!page.id) break;
+      page = await messenger.messages.continueList(page.id);
+    }
+  }
+  if (matches.length === 0) return null;
+  const sent = matches.filter((match) => match.status === "sent");
+  const preferred = (sent.length ? sent : matches).sort((left, right) => Number(left.message.id) - Number(right.message.id));
+  const ids = new Set(preferred.map((match) => match.message.headerMessageId).filter(Boolean));
+  if (ids.size > 1) return null;
+  const selected = preferred[0];
+  return {
+    ...selected,
+    evidence: {
+      operationId,
+      draftHash,
+      requestId,
+      profileFingerprint: binding.profileFingerprint,
+      sourceRfcMessageId: binding.sourceRfcMessageId,
+      envelopeHash: binding.envelopeHash,
+      matchedCopies: preferred.map((match) => ({ messageId: match.message.id, folderId: match.folderId, rfcMessageId: match.message.headerMessageId || null })),
+      selectedMessageId: selected.message.id
+    }
+  };
+}
+
+function envelopeMatchesReceipt(message, receipt) {
+  const senderAddress = String(receipt.senderIdentity?.address || "").toLowerCase();
+  const author = String(message.author || "").toLowerCase();
+  const same = (left, right) => stableJson(normalizeAddresses(left).map((value) => value.toLowerCase()).sort()) === stableJson(normalizeAddresses(right).map((value) => value.toLowerCase()).sort());
+  return (!senderAddress || author.includes(senderAddress)) && same(message.recipients, receipt.recipients?.to) && same(message.ccList, receipt.recipients?.cc) && same(message.bccList, receipt.recipients?.bcc);
+}
+
+function normalizeSafetyHeaders(headers) {
+  const names = [
+    "auto-submitted", "precedence", "list-id", "x-auto-response-suppress", "reply-to",
+    "x-thunderbird-mcp-operation-id", "x-thunderbird-mcp-draft-hash", "x-thunderbird-mcp-request-id",
+    "x-thunderbird-mcp-profile", "x-thunderbird-mcp-source", "x-thunderbird-mcp-envelope"
+  ];
+  for (const candidate of Object.keys(headers || {})) {
+    const lower = candidate.toLowerCase();
+    if (lower.startsWith("x-") && /(automation|correlation|operation|request|idempot)/.test(lower) && !names.includes(lower)) {
+      names.push(lower);
+    }
+  }
+  return Object.fromEntries(names.sort().map((name) => [name, headerValues(headers, name)]));
+}
+
+function headerValues(headers, name) {
+  const key = Object.keys(headers || {}).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  const value = key ? headers[key] : [];
+  return (Array.isArray(value) ? value : [value]).filter((entry) => typeof entry === "string").map((entry) => entry.trim());
+}
+
+function headerFirst(headers, name) { return headerValues(headers, name)[0] || null; }
+function mergeReferences(values, messageId) {
+  const references = values.flatMap((value) => value.split(/\s+/)).filter(Boolean);
+  if (messageId && !references.includes(messageId)) references.push(messageId);
+  return references;
+}
+function normalizeAddresses(value) {
+  return (Array.isArray(value) ? value : value ? [value] : []).map((item) => String(item).trim());
+}
+function stableJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+}
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function getProfileFingerprint() {
+  const key = "safeReplyProfileFingerprint";
+  const stored = await messenger.storage.local.get(key);
+  if (typeof stored[key] === "string" && stored[key]) return stored[key];
+  const fingerprint = await sha256Hex(`thunderbird-profile:${crypto.randomUUID()}:${Date.now()}`);
+  await messenger.storage.local.set({ [key]: fingerprint });
+  return fingerprint;
+}
+function codedError(message, code) { const error = new Error(message); error.code = code; return error; }
 
 async function sendComposeTab(tabId, payload = {}) {
   const mode = resolveSendMode(payload.mode);
@@ -1068,6 +1625,11 @@ function compactMessageHeader(message) {
     author: normalized.author,
     subject: normalized.subject,
     recipients: normalized.recipients,
+    ccList: normalized.ccList,
+    bccList: normalized.bccList,
+    headerMessageId: normalized.headerMessageId,
+    accountId: normalized.folder?.accountId,
+    folderId: normalized.folder?.id,
     folderPath: normalized.folder?.path,
     folderName: normalized.folder?.name,
     read: normalized.read,
@@ -1397,3 +1959,14 @@ messenger.messageDisplayAction?.onClicked?.addListener(() => {
 messenger.composeAction?.onClicked?.addListener(() => {
   connectNativeHost();
 });
+
+if (typeof globalThis !== "undefined") {
+  globalThis.__thunderbirdMcpTest = {
+    dispatch,
+    stableJson,
+    normalizeSafetyHeaders,
+    validateSafePreviewPayload,
+    assertResolvedCompose,
+    sha256Hex
+  };
+}
